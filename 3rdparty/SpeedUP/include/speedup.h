@@ -16,7 +16,7 @@
 #define SPEEDUP_H
 
 #include <stdint.h>
-#include "rknn3_api.h"
+#include <rknn3_api.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +24,7 @@ extern "C" {
 
 #define SPEEDUP_VERSION_MAJOR 1
 #define SPEEDUP_VERSION_MINOR 0
-#define SPEEDUP_VERSION_PATCH 0
+#define SPEEDUP_VERSION_PATCH 1
 
 typedef struct SpeedUPContext* SpeedUPHandle;
 
@@ -382,8 +382,9 @@ int speedup_mrope_input_callback(void* userdata,
 /**
  * @brief Attaches SpeedUP runtime input callback to an RKNN3 LLM session.
  *
- * The function queries the required runtime tensor index, preserves base_callback behavior,
- * and registers a combined callback for the session.
+ * The public wrapper passes sizeof(rknn3_tensor_attr) from the application build to
+ * libSpeedUP. This keeps the prebuilt library independent of later, compatible
+ * rknn3_tensor_attr size extensions.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in] rknn_ctx RKNN3 context handle used by the LLM model.
@@ -396,10 +397,19 @@ int speedup_mrope_input_callback(void* userdata,
  * @note Attach once during model/session initialization. Do not repeatedly attach the callback
  *       for every inference request.
  */
-int speedup_attach_mrope_callback(SpeedUPHandle handle,
-                                       rknn3_context rknn_ctx,
-                                       rknn3_session* llm_sess,
-                                       const RKLLMCallback* base_callback);
+int speedup_attach_mrope_callback_with_attr_size(SpeedUPHandle handle,
+                                                 rknn3_context rknn_ctx,
+                                                 rknn3_session* llm_sess,
+                                                 const RKLLMCallback* base_callback,
+                                                 uint64_t tensor_attr_size);
+
+static inline int speedup_attach_mrope_callback(SpeedUPHandle handle,
+                                                rknn3_context rknn_ctx,
+                                                rknn3_session* llm_sess,
+                                                const RKLLMCallback* base_callback) {
+    return speedup_attach_mrope_callback_with_attr_size(
+        handle, rknn_ctx, llm_sess, base_callback, sizeof(rknn3_tensor_attr));
+}
 
 /**
  * @brief Restores the callback supplied to speedup_attach_mrope_callback().
