@@ -1,0 +1,62 @@
+// Copyright (c) 2026 by Rockchip Electronics Co., Ltd. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+#ifndef _RKNN_DEMO_MAGE_VL_VISION_UTILS_H_
+#define _RKNN_DEMO_MAGE_VL_VISION_UTILS_H_
+
+#include <stddef.h>
+
+#include "rknn3_api.h"
+#include "common.h"
+
+#define MODEL_WIDTH 384 // 由于vision模型被裁剪了，需要手动添加这些参数配置
+#define MODEL_HEIGHT 384
+#define MAGE_VL_PATCH_SIZE 16
+#define MAGE_VL_MERGE_SIZE 2
+#define MAGE_VL_ROTARY_DIM 64
+
+typedef struct {
+    rknn3_context rknn_ctx;
+    rknn3_input_output_num io_num;
+    rknn3_tensor* inputs;
+    rknn3_tensor* outputs;
+
+    int model_channel;
+    int model_height;
+    int model_width;
+
+    uint32_t* embeds_shape;
+    uint32_t embeds_ndims;
+    int patch_num;
+    int pixel_values_index;
+    int rotary_pos_emb_index;
+    int legacy_tensor_attr_abi;
+} rknn_mage_vl_vision_context;
+
+int init_mage_vl_vision(rknn_mage_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, uint32_t model_width, uint32_t model_height);
+int init_mage_vl_vision_ex(rknn_mage_vl_vision_context* vision_ctx,
+                           const char* model_path, const char* weight_path,
+                           uint32_t core_mask, uint32_t model_width,
+                           uint32_t model_height, int user_mem_internal);
+
+int release_mage_vl_vision(rknn_mage_vl_vision_context* vision_ctx);
+
+int inference_mage_vl_vision(rknn_mage_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds);
+int inference_mage_vl_vision_with_rotary(
+    rknn_mage_vl_vision_context* vision_ctx, image_buffer_t* img,
+    const float16* rotary_pos_emb, size_t rotary_element_count,
+    float16* img_embeds);
+
+#endif //_RKNN_DEMO_MAGE_VL_VISION_UTILS_H_

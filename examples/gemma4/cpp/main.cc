@@ -441,11 +441,12 @@ static void print_usage(const char* program)
        "<per_layer_embed_path> <safetensors_path> "
        "<audio_model_path> <audio_weight_path> <audio_core_mask> "
        "<vision_model_path> <vision_weight_path> <vision_core_mask> "
-       "<audio_path> <image_path> [prompt]\n",
+       "<audio_path> <image_path> [prompt] [audio_mode]\n",
        program);
   LOGW("\nNote:\n");
   LOGW("  4 modes: LLM only | LLM+Audio | LLM+Vision | LLM+Audio+Vision\n");
   LOGW("  Use empty string \"\" for both rknn and weight of a modality to skip loading it.\n");
+  LOGW("  audio_mode: offline (default, original Audio Tower) | streaming (dynamic-bucket stateful Audio Tower).\n");
   LOGW("  Example LLM only: %s <llm params>... \"\" \"\" 0 \"\" \"\" 0 \"\" \"\" [prompt]\n", program);
   LOGW("  Example LLM+Audio: %s <llm params>... audio.rknn audio.weight 0xff \"\" \"\" 0 audio.wav \"\" \"<audio>将语音转为文本\"\n", program);
   LOGW("  Example LLM+Vision: %s <llm params>... \"\" \"\" 0 vis.rknn vis.weight 0xff \"\" img.jpg \"<image>请描述图片\"\n", program);
@@ -534,7 +535,7 @@ static void print_perf(const rknn_perf_metrics_t* perf)
 
 int main(int argc, char** argv)
 {
-  if (argc < 18 || argc > 19) {
+  if (argc < 18 || argc > 20) {
     print_usage(argv[0]);
     return -1;
   }
@@ -557,11 +558,24 @@ int main(int argc, char** argv)
   const char* audio_path               = argv[16];
   const char* image_path               = argv[17];
   const char* prompt                   = (argc >= 19) ? argv[18] : NULL;
+  const char* audio_mode               = (argc >= 20) ? argv[19] : "offline";
 
   bool enable_audio = !is_empty_arg(audio_model_path) && !is_empty_arg(audio_weight_path);
+  bool audio_streaming = strcmp(audio_mode, "streaming") == 0;
   bool enable_vision = !is_empty_arg(vision_model_path) && !is_empty_arg(vision_weight_path);
   bool audio_pair_empty = is_empty_arg(audio_model_path) && is_empty_arg(audio_weight_path);
   bool vision_pair_empty = is_empty_arg(vision_model_path) && is_empty_arg(vision_weight_path);
+
+  if (strcmp(audio_mode, "offline") != 0 && !audio_streaming) {
+    LOGW("Error: audio_mode must be 'offline' or 'streaming', got '%s'.\n", audio_mode);
+    print_usage(argv[0]);
+    return -1;
+  }
+  if (audio_streaming && !enable_audio) {
+    LOGW("Error: streaming audio_mode requires an Audio model.\n");
+    print_usage(argv[0]);
+    return -1;
+  }
 
   if (!enable_audio && !audio_pair_empty) {
     LOGW("Error: audio rknn and audio weight must be both provided or both empty strings.\n");
@@ -654,7 +668,7 @@ int main(int argc, char** argv)
   callback.input_userdata     = &input_cb_data;
 
   ret = init_gemma4_model(&app_ctx, llm_model_path, llm_weight_path, audio_model_path, audio_weight_path,
-                          enable_audio, enable_vision,
+                          enable_audio, audio_streaming, enable_vision,
                           &params, 1, callback, llm_core_mask, audio_core_mask, vision_core_mask,
                           per_layer_embed_path, NULL, tokenizer, &token_embedding, &input_cb_data,
                           vision_model_path, vision_weight_path);
@@ -675,8 +689,20 @@ int main(int argc, char** argv)
     printf("audio: num_frames=%d, num_channels=%d, sample_rate=%d\n",
            src_audio.num_frames, src_audio.num_channels, src_audio.sample_rate);
 
-    n_audio_tokens = get_n_audio(&app_ctx.audio, src_audio.num_frames);
-    n_embed_audio = n_audio_tokens * app_ctx.audio.embeds_dim1;
+    if (audio_streaming) {
+      const int selected_audio_tokens = get_n_audio_stream(src_audio.num_frames);
+      if (selected_audio_tokens <= 0) {
+        printf("No valid streaming audio tokens for %d waveform samples\n",
+               src_audio.num_frames);
+        ret = -1;
+        goto out;
+      }
+      n_audio_tokens = (size_t)selected_audio_tokens;
+      n_embed_audio = n_audio_tokens * (size_t)get_gemma4_audio_stream_embedding_dim();
+    } else {
+      n_audio_tokens = get_n_audio(&app_ctx.audio, src_audio.num_frames);
+      n_embed_audio = n_audio_tokens * app_ctx.audio.embeds_dim1;
+    }
     audio_embeds = (float16*)malloc(n_embed_audio * sizeof(float16));
     if (!audio_embeds) {
       printf("Failed to allocate audio_embeds\n");
@@ -764,7 +790,10 @@ int main(int argc, char** argv)
   tensor.enable_thinking = false;
   if (enable_audio) {
     tensor.audio.audio_embed    = audio_embeds;
-    tensor.audio.n_audio_tokens = 0; // update after audio encoder inference
+    // Streaming uses this field as output-buffer capacity until inference
+    // replaces it with the exact valid token count. Keep the original offline
+    // initialization unchanged.
+    tensor.audio.n_audio_tokens = audio_streaming ? n_audio_tokens : 0;
     tensor.audio.n_audio        = n_audio;
     tensor.audio.audio_start    = "<|audio>";
     tensor.audio.audio_end      = "<audio|>";

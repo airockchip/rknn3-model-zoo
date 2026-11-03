@@ -63,46 +63,22 @@ static void free_input_data(qaclipvit_input_data_t* input_data) {
         free(input_data->position_ids);
         input_data->position_ids = NULL;
     }
-
-    if (input_data->Th) {
-        free(input_data->Th);
-        input_data->Th = NULL;
-    }
-    if (input_data->Tc) {
-        free(input_data->Tc);
-        input_data->Tc = NULL;
-    }
-    if (input_data->Ts) {
-        free(input_data->Ts);
-        input_data->Ts = NULL;
-    }
-    if (input_data->Tsr) {
-        free(input_data->Tsr);
-        input_data->Tsr = NULL;
-    }
 }
 
-// 准备文本输入数据
-static int prepare_text_input_data(qaclipvit_input_data_t* input_data,
-                                  embedding_info_t* embedding_info,
-                                  Tokenizer* tokenizer,
-                                  const char* text, 
-                                  int seq_len) {
+// 从已分词的 token 生成输入数据（含 padding 补零），并记录有效 token 数 ntok 供动态选桶
+static int fill_text_input_data(qaclipvit_input_data_t* input_data,
+                                embedding_info_t* embedding_info,
+                                const int32_t* tokens, int token_size,
+                                int seq_len) {
     memset(input_data, 0, sizeof(qaclipvit_input_data_t));
 
-    int32_t tokens[MAX_SEQ_LEN];
-    int token_size = tokenizer->Tokenize(text, strlen(text), tokens, MAX_SEQ_LEN);
-    if (token_size <= 0) {
-        printf("Error: tokenize failed.\n");
-        return -1;
-    }
-    printf("Token size: %d ,seq_len size is %d\n", token_size, seq_len);
     // 检查 token 数量是否超过序列长度
     if (token_size > seq_len) {
-        printf("Warning: Token count %d exceeds sequence length %d, truncating\n", 
+        printf("Warning: Token count %d exceeds sequence length %d, truncating\n",
                token_size, seq_len);
         token_size = seq_len;
     }
+    input_data->ntok = token_size;
     
     // 生成input_embeds
     input_data->input_embeds = (float16*)malloc(1 * seq_len * embedding_info->embedding_dim * sizeof(float16));
@@ -114,7 +90,6 @@ static int prepare_text_input_data(qaclipvit_input_data_t* input_data,
     // 从token生成embedding
     for (int i = 0; i < token_size && i < seq_len; i++) {
         int token_id = tokens[i];
-        printf("Token ID: %d\n", token_id);
         if (token_id < 0 || token_id >= embedding_info->vocab_size) {
             printf("Error: token_id %d out of range\n", token_id);
             return -1;
@@ -132,7 +107,6 @@ static int prepare_text_input_data(qaclipvit_input_data_t* input_data,
         float16* padding_start = input_data->input_embeds + token_size * embedding_info->embedding_dim;
         memset(padding_start, 0, remaining * embedding_info->embedding_dim * sizeof(float16));
     }
-    printf("Token ID end\n");
     // 设置attention_mask
     input_data->attention_mask = (float16*)malloc(1 * seq_len * sizeof(float16));
     for (int i = 0; i < seq_len; i++) {
@@ -144,16 +118,6 @@ static int prepare_text_input_data(qaclipvit_input_data_t* input_data,
     for (int i = 0; i < seq_len; i++) {
         input_data->position_ids[i] = i;
     }
-    
-    input_data->Th = (int32_t*)malloc(sizeof(int32_t));
-    input_data->Tc = (int32_t*)malloc(sizeof(int32_t));
-    input_data->Ts = (int32_t*)malloc(sizeof(int32_t));
-    input_data->Tsr = (int32_t*)malloc(sizeof(int32_t));
-    
-    input_data->Th[0] = 0;
-    input_data->Tc[0] = token_size;//;
-    input_data->Ts[0] = 0;
-    input_data->Tsr[0] = 0;
     
     return 0;
 }
@@ -306,10 +270,26 @@ int inference_qaclipvit_model(rknn_qaclipvit_context_t* ctx,
     memset(&text_input_data, 0, sizeof(qaclipvit_input_data_t));
     memset(&text_result, 0, sizeof(qaclipvit_result_t));
     
-    ret = prepare_text_input_data(&text_input_data, &ctx->embedding_info, 
-                                 ctx->tokenizer, text, MAX_SEQ_LEN);
+    // 先分词得到 token 数，再按 token 数选桶（128/256/352），短文本减少 padding 无效计算
+    int32_t tokens[MAX_SEQ_LEN];
+    int token_size = ctx->tokenizer->Tokenize(text, strlen(text), tokens, MAX_SEQ_LEN);
+    if (token_size <= 0) {
+        printf("Error: tokenize failed.\n");
+        return -1;
+    }
+    printf("Token size: %d\n", token_size);
+    int bucket_idx = select_qaclipvit_text_bucket(&ctx->text_ctx, token_size);
+    if (bucket_idx < 0) {
+        printf("Failed to select text bucket for %d tokens\n", token_size);
+        return -1;
+    }
+    int seq_len = ctx->text_ctx.buckets[bucket_idx].seq;
+    printf("Selected text bucket[%d] seq=%d\n", bucket_idx, seq_len);
+
+    ret = fill_text_input_data(&text_input_data, &ctx->embedding_info,
+                               tokens, token_size, seq_len);
     if (ret != 0) {
-        printf("Failed to prepare text input data\n");
+        printf("Failed to fill text input data\n");
         return ret;
     }
     ret = inference_qaclipvit_embedding_model(&ctx->text_ctx, &text_input_data, &text_result);

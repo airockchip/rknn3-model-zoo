@@ -1,0 +1,13 @@
+# Upstream baseline and ONNX-export environment.
+# RKNN3 Toolkit must be installed in a separate environment.
+torch==2.9.0
+torchvision==0.24.0
+transformers>=5.7,<6
+accelerate
+numpy==1.26.4
+pillow
+opencv-python==4.11.0.86
+codec-video-prep==0.2.5
+huggingface-hub
+safetensors
+sentencepiece

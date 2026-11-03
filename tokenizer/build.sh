@@ -34,12 +34,12 @@ while getopts "s:a:b:mn:" opt; do
   esac
 done
 
-if [ x"${TARGET_SYSTEM}" != x"linux" ]  &&  [ x"${TARGET_SYSTEM}" != x"android" ]  &&  [ x"${TARGET_SYSTEM}" != x"riscv64" ]  &&  [ x"${TARGET_SYSTEM}" != x"cygwin" ]; then
+if [ x"${TARGET_SYSTEM}" != x"linux" ]  &&  [ x"${TARGET_SYSTEM}" != x"android" ]  &&  [ x"${TARGET_SYSTEM}" != x"riscv64" ]  &&  [ x"${TARGET_SYSTEM}" != x"cygwin" ]  &&  [ x"${TARGET_SYSTEM}" != x"macos" ]; then
   echo "$0 -s <system> -a <arch> -n <sdk> -b <build_type>"
   echo "Please select config:"
   echo ""
-  echo "    -s : system (linux/android/riscv64/cygwin)"
-  echo "    -a : arch (linux: aarch64/armhf/x86; android: arm64-v8a/armeabi-v7a)"
+  echo "    -s : system (linux/android/riscv64/cygwin/macos)"
+  echo "    -a : arch (linux: aarch64/armhf/x86; android: arm64-v8a/armeabi-v7a; macos: arm64/x86_64)"
   echo "    -n : sdk name(hello)"
   echo "    -b : build_type(Debug/Release/RelWithDebInfo)"
   echo "    -m : enable asan"
@@ -74,6 +74,10 @@ fi
 
 if [ "${TARGET_SYSTEM}" == "cygwin" ]; then
     source env_cygwin.sh
+fi
+
+if [ "${TARGET_SYSTEM}" == "macos" ]; then
+    source env_macos.sh
 fi
 
 TARGET_PLATFORM=${TARGET_SYSTEM}
@@ -168,6 +172,20 @@ elif [ "${TARGET_SYSTEM}" == "x86" ]; then
       -DBUILD_SHARED_LIBS=OFF \
       -DENABLE_ASAN=${ENABLE_ASAN} \
       -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}
+elif [ "${TARGET_SYSTEM}" == "macos" ]; then
+  MACOS_CMAKE_ARGS=(
+      -DCMAKE_SYSTEM_NAME=Darwin
+      -DCMAKE_C_COMPILER=${C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${CXX_COMPILER}
+      -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
+      -DBUILD_SHARED_LIBS=OFF
+      -DENABLE_ASAN=${ENABLE_ASAN}
+      -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}
+  )
+  if [[ -n ${TARGET_ARCH} ]]; then
+    MACOS_CMAKE_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=${TARGET_ARCH})
+  fi
+  cmake ../.. "${MACOS_CMAKE_ARGS[@]}"
 fi
 
 make -j16

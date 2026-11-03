@@ -1,0 +1,13 @@
+# 另需安装面向 RK1828 的 RKNN3 Toolkit，含 GRQ 量化模块。
+qwen-asr==0.0.6
+torch==2.10.0
+transformers==4.57.6
+onnx==1.18.0
+onnxscript
+numpy==1.26.4
+soundfile==0.14.0
+safetensors
+sentencepiece
+protobuf
+huggingface_hub
+modelscope

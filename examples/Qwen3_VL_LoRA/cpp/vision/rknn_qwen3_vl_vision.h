@@ -32,12 +32,22 @@ typedef struct {
     uint32_t* embeds_shape;
     uint32_t embeds_ndims;
     int pruned_version_flag;
+
+    rknn3_lora lora;         // vision LoRA 适配器（由 vision *.lora_weight 加载）
+    bool       lora_loaded;  // 是否已成功加载 LoRA
+    bool       lora_enabled; // 当前 context 上是否已启用 LoRA
 } rknn_qwen3_vl_vision_context;
 
-int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, int* deepstack_aligned_size, uint32_t model_width, uint32_t model_height);
+int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, int* deepstack_aligned_size, uint32_t model_width, uint32_t model_height, const char* lora_weight_path = nullptr);
+
+// 加载 vision LoRA。注意：rknn3_lora_init 要求 rknn3_model_init 之后调用；
+// 本 demo 在 model_init 之后还会调用 rknn3_set_internal_mem() 重配内部内存，
+// 因此 LoRA 的加载放在所有内存配置完成之后（init_internal_share 之后）再执行。
+int setup_qwen3_vl_vision_lora(rknn_qwen3_vl_vision_context* vision_ctx, const char* lora_weight_path);
 
 int release_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx);
 
-int inference_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, float16* deepstack_data0, float16* deepstack_data1, float16* deepstack_data2);
+// use_lora=true 时在 vision context 上启用 LoRA，false 时确保关闭，从而得到 base / lora 两套 vision embedding
+int inference_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, float16* deepstack_data0, float16* deepstack_data1, float16* deepstack_data2, bool use_lora = false);
 
 #endif //_RKNN_DEMO_QWEN3_VL_VISION_UTILS_H_

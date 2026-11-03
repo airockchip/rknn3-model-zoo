@@ -68,6 +68,22 @@ python export_rknn.py --model_type e4b
 
 > **注意**：Audio 模型与 LLM 模型需使用同一版本（同为 E2B 或同为 E4B），不可混用。
 
+流式 Audio 使用显式状态反馈，并通过 RKNN3 动态输入配置生成多个 Mel 长度桶。原有命令仍导出离线 Audio Tower；仅在增加 `--streaming` 时导出流式模型。
+
+```bash
+# 导出流式 ONNX（示例跟踪长度 720，时间轴保持动态）
+python export_audio.py \
+    --streaming \
+    --export_audio_path ../../model/audio/gemma-4-e2b-it-audio-stream.onnx
+
+# 转换为 240/480/720 三桶 RKNN3 模型
+python export_streaming_rknn.py \
+    --onnx_path ../../model/audio/gemma-4-e2b-it-audio-stream.onnx \
+    --rknn_path ../../model/audio/gemma-4-e2b-it-audio-stream.rknn \
+    --buckets 240,480,720 \
+    --core_num 8
+```
+
 ### 2.3 Vision 模型
 
 ```bash
@@ -147,7 +163,7 @@ adb push install/rk3588_linux_aarch64/rknn_gemma4_demo/lib/* /usr/lib/
     <per_layer_embed_path> <safetensors_path> \
     <audio_model_path> <audio_weight_path> <audio_core_mask> \
     <vision_model_path> <vision_weight_path> <vision_core_mask> \
-    <audio_path> <image_path> [prompt]
+    <audio_path> <image_path> [prompt] [audio_mode]
 ```
 
 进入运行目录并赋予可执行权限：
@@ -236,6 +252,15 @@ chmod +x rknn_gemma4_demo
     "<image>请描述图片"
 ```
 
+流式 Audio + LLM 与 3.3.2 使用相同参数，仅将 Audio 模型替换为流式多桶模型，并在命令末尾增加 `streaming`：
+
+```bash
+./rknn_gemma4_demo <其余参数> \
+    demo_16k_mono_f32.wav "" "<audio>将这段语音转为文本" streaming
+```
+
+不指定 `[audio_mode]` 或指定 `offline` 时，仍使用原有离线 Audio Tower。
+
 > **e4b 只需将上述命令中的 e2b 对应模型文件替换为 e4b 对应模型文件即可。Audio、Vision 与 LLM 模型必须来自同一版本，不可混用。**
 
 ### 3.4 参数说明
@@ -260,12 +285,14 @@ chmod +x rknn_gemma4_demo
 | `<audio_path>` | 音频文件路径；不使用 Audio 时填写 `""` |
 | `<image_path>` | 图片文件路径；不使用 Vision 时填写 `""` |
 | `[prompt]` | 可选输入提示词。音频输入需包含 `<audio>`，图片输入需包含 `<image>` |
+| `[audio_mode]` | 可选 Audio 执行方式：`offline`（默认）或 `streaming` |
 
 ### 3.5 加载约束
 - Audio 与 Vision 是否加载只由对应 `.rknn` 和 `.weight` 两个参数决定。
 - 不加载某一模态时，该模态的 `.rknn` 和 `.weight` 必须同时填写空字符串 `""`。
 - 加载某一模态时，该模态的 `.rknn` 和 `.weight` 必须同时填写实际路径。
 - Audio、Vision 与 LLM 模型需保持同一模型版本，例如均为 E2B 或均为 E4B。
+- `streaming` 模式要求 Audio RKNN 模型为 8 输入、7 输出的显式状态接口，并包含动态 Mel 桶。
 
 ## 4. 音频格式要求
 

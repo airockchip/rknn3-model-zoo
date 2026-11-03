@@ -38,6 +38,11 @@ typedef struct
     rknn3_tensor_mem* kvcache_mems[32];
     int kvcache_core_ids[32];
     uint32_t n_kvcache_mems;
+    uint32_t kvcache_residual_depth;
+#ifdef RKNN3_MAX_CACHE_PAGE_TYPES
+    rknn3_kvcache_page_binding kvcache_bindings[32];
+    uint32_t n_kvcache_bindings;
+#endif
 } rknn_app_context_t;
 
 // typedef struct

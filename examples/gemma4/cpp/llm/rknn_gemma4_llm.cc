@@ -254,7 +254,7 @@ int inference_gemma4_llm(rknn_gemma4_llm_context* llm_ctx, rknn3_llm_multimodal_
     return ret;
   }
 
-  ret = rknn3_session_clear_kvcache(llm_ctx->rknn_sess, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT);
+  ret = rknn3_session_clear_kvcache(llm_ctx->rknn_sess, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT, nullptr);
   if (ret != RKNN3_SUCCESS) {
     printf("rknn3_session_clear_kvcache failed! ret=%d\n", ret);
     return ret;

@@ -42,6 +42,7 @@ add_executable(${PROJECT_NAME}
     llm/rknn_gemma4_llm.cc
     vision/rknn_gemma4_vision.cc
     audio/rknn_gemma4_audio.cc
+    audio/rknn_gemma4_audio_stream.cc
 )
 
 target_link_libraries(${PROJECT_NAME}

@@ -1,0 +1,14 @@
+# Spark-X2.5-1.7B original-model (HuggingFace) inference dependencies.
+# Tested in the conda "rk100" env (python 3.10, CUDA 12.8).
+# - infer_hf.py:  loads ../model/Spark-X2.5-1.7B with trust_remote_code and
+#   runs `model.generate` on CUDA.
+# The model code (modeling_spark.py) needs transformers >= 4.57.1
+# (transformers.masking_utils / TransformersKwargs); the env was upgraded
+# from 4.51.3 to 4.57.1 for this example.
+torch==2.8.0
+transformers==4.57.1
+tokenizers==0.22.2
+accelerate==1.13.0
+safetensors==0.7.0
+Jinja2==3.1.6
+numpy==1.26.4

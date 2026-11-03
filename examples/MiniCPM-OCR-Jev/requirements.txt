@@ -1,0 +1,35 @@
+# utils
+psutil>=5.9.0
+ruamel.yaml>=0.17.21
+scipy>=1.9.3
+tqdm>=4.64.1
+opencv-python>=4.5.5.64
+fast-histogram>=0.11
+numpy<=1.26.4
+
+accelerate>=0.26.0
+tabulate
+pandas
+prettytable
+
+timm>=1.0.15
+SentencePiece>=0.2.0
+
+# base
+onnx==1.18.0
+onnxruntime==1.22.1
+
+torch == 2.7.0
+Transformers == 5.3.0
+optimum==1.26.1
+#auto_gptq==0.7.1
+peft==0.15.2
+
+protobuf>=4.21.6,<=4.25.4
+
+# tokenizer
+mistral-common>=1.8.3
+
+modelscope
+
+onnxscript

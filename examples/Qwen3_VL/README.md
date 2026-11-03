@@ -157,7 +157,7 @@ export GCC_COMPILER=/path/to/aarch64-linux-gnu
 
 C++ 推理代码已实现模型格式自动识别，无需修改代码即可兼容裁剪版与完整版模型。
 
-C++ demo 保持原有命令行参数兼容；如需启用 SpeedUP，可在命令末尾增加可选参数
+C++ demo 保持原有命令行参数兼容。使用 SpeedUP 时，请先准备好 SpeedUP 头文件及对应平台的库，并在 `build-linux.sh` 命令末尾添加 `--enable_speedup`。运行时可在命令末尾增加可选参数
 `speedup_ratio`：
 
 ```bash
@@ -171,7 +171,7 @@ C++ demo 保持原有命令行参数兼容；如需启用 SpeedUP，可在命令
 ```
 
 `speedup_ratio` 取值说明：
-- `1.0`：自动模式。
+- `1.0`：单图自动模式，多图不支持 Auto。
 - `0.0`：关闭 SpeedUP。
 - `(0.0, 1.0)`：手动模式。
 

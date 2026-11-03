@@ -90,7 +90,7 @@ whisper_decode1_base.config.pkl
 | `--seq_len`      | int  | Decode0 导出使用的 dummy decoder 序列长度                     | `4`                       |
 | `--past_seq_len` | int  | Decode1 导出使用的 dummy position id                          | `4`                       |
 
-> **注意**：输出文件名中的 `base` 来自模型名 `openai/whisper-base`。如果使用 `openai/whisper-large-v3`，suffix 会变成 `large-v3`，后续 RKNN 导出和运行命令中的文件名也需要相应修改。暂只支持whisper-base。
+> **注意**：输出文件名中的 `base` 来自模型名 `openai/whisper-base`。如果使用 `openai/whisper-large-v3-turbo`，suffix 会变成 `large-v3-turbo`，后续 RKNN 导出和运行命令中的文件名也需要相应修改。当前支持 whisper-base 和 whisper-large-v3-turbo；Turbo 运行时需添加 `--model-type turbo`。
 
 ## 3. RKNN 模型导出
 

@@ -16,7 +16,11 @@ set(SHARED_SOURCES
 
 
 set(RKNN_API_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/rknpu3/include)
-set(RKNN_LIB_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/rknpu3/Linux/aarch64)
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(RKNN_LIB_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/rknpu3/Android/arm64-v8a)
+else()
+    set(RKNN_LIB_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../../3rdparty/rknpu3/Linux/aarch64)
+endif()
 
 
 message(STATUS "RKNN_API_PATH: ${RKNN_API_PATH}")
@@ -50,6 +54,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
     target_link_libraries(rknn_whisper_raw_demo Threads::Threads)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # librknn3_api.so(Android)依赖__android_log_print，需要链接liblog
+    target_link_libraries(rknn_whisper_raw_demo log)
 endif()
 
 target_include_directories(rknn_whisper_raw_demo PRIVATE

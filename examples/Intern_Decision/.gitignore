@@ -1,0 +1,13 @@
+!model/
+model/*
+!model/customer_service.json
+!model/street_scene.json
+!model/bus.jpg
+__pycache__/
+*.onnx
+*.rknn
+*.weight
+*.embed.bin
+*.tokenizer.gguf
+*.config.pkl
+model/decision.json

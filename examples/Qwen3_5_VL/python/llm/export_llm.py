@@ -5,9 +5,11 @@ import torch
 import importlib.util
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from py_utils.export_llm_helper import causal_qwen_3_5_llm_to_onnx, update_config, export_tokenizer, export_llm_config, export_embed_weight
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from lora_node_map import build_hf_onnx_mapping
 
 
 ## 避免flashatten报错
@@ -27,10 +29,16 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
 
     parser = ArgumentParser(description="Export Qwen/Qwen3_5 llm configuration and onnx model for RKNN")
-    parser.add_argument("--model_path", type=str, help="model path or name", required=False, default="Qwen/Qwen3.5-0.8B")
+    parser.add_argument("--model_path", type=str, help="model path or name", required=False, default="Qwen/Qwen3.5-4B")
     parser.add_argument("--quant", action='store_true', help="Whether use GRQ quantization")
     parser.add_argument("--cali_dataset", default='./quant_data/model_inputs.json', help="some samples for grq quantized_algorithm")
-    parser.add_argument("--export_llm_path", type=str, help="export llm onnx model path", required=False, default="../../model/llm/Qwen3.5-0.8B-llm.onnx")
+    parser.add_argument("--export_llm_path", type=str, help="export llm onnx model path", required=False, default="../../model/llm/Qwen3.5-4B-llm.onnx")
+    parser.add_argument(
+        "--hf_onnx_map",
+        type=str,
+        default=None,
+        help="HF weight to ONNX initializer/op mapping; defaults to <export_llm_path>.hf_onnx_map.json",
+    )
     parser.add_argument("--modelscope", action='store_true', help="Whether download model from www.modelscope.cn")
     args = parser.parse_args()
     
@@ -135,7 +143,7 @@ if __name__ == '__main__':
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     # 直接用注入的 export 版 modeling 类加载模型，避免 AutoModelForCausalLM 复用 quant 阶段
     # 缓存的原生 Qwen3_5ForCausalLM（其 linear attn 走 fla triton kernel，在 CPU 上无法导出 onnx）
-    model = modeling_module.Qwen3_5ForCausalLM.from_pretrained(args.model_path, torch_dtype="float32", device_map="cpu")
+    model = modeling_module.Qwen3_5ForCausalLM.from_pretrained(args.model_path, torch_dtype="float32", device_map="cpu", attn_implementation="eager")
 
         
     if fakeq_state is not None:
@@ -158,6 +166,12 @@ if __name__ == '__main__':
     
     # Export llm to onnx
     causal_qwen_3_5_llm_to_onnx(exported_model, args)
+
+    # Persist the exact base-HF weight -> ONNX op relation.  export_rknn.py
+    # uses this file to resolve the PEFT LoRA keys without relying on a
+    # fragile name-prefix convention.
+    hf_onnx_map_path = args.hf_onnx_map or (os.path.splitext(args.export_llm_path)[0] + '.hf_onnx_map.json')
+    build_hf_onnx_mapping(args.export_llm_path, model.state_dict(), hf_onnx_map_path)
 
     # Export LLM configuration 
     export_llm_config(args.model_path, os.path.splitext(args.export_llm_path)[0] + '.config.pkl', chat_context, prompt)

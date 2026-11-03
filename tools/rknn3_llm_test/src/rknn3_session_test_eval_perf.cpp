@@ -299,14 +299,12 @@ int main(int argc, char **argv)
   RKLLMCallback callback;
   rknn3_llm_param params;
   RKLLMRunState state;
-  rknn3_lora loras_enabled[RKNN3_MAX_LORA_NUM];
   rknn3_llm_config llm_config;
   memset(&vocab_info, 0, sizeof(VocabInfo));
   memset(&embedding_info, 0, sizeof(struct embedding_info));
   memset(&callback, 0, sizeof(RKLLMCallback));
   memset(&params, 0, sizeof(rknn3_llm_param));
   memset(&state, 0, sizeof(RKLLMRunState));
-  memset(&loras_enabled, 0, sizeof(rknn3_lora) * RKNN3_MAX_LORA_NUM);
   memset(&llm_config, 0, sizeof(rknn3_llm_config));
 
   int test_num = 3;
@@ -456,7 +454,7 @@ int main(int argc, char **argv)
       goto exit;
     }
 
-    ret = rknn3_session_clear_kvcache(session, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT);
+    ret = rknn3_session_clear_kvcache(session, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT, nullptr);
     if (ret != RKNN3_SUCCESS)
     {
       printf("rknn3_session_clear_kvcache failed, ret=%d\n", ret);

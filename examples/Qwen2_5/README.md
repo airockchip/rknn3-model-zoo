@@ -27,9 +27,7 @@ Qwen2.5-3B-Instruct.tokenizer.gguf
 Qwen2.5-3B-Instruct.embed.bin
 ```
 
-同时会基于 `datasets/CMMLU/dataset.json` 生成量化数据集 `datasets/CMMLU/dataset.txt`。
-
-> `--quant` 参数可启用 AWQ + GRQ 量化（需要 CUDA 环境）。
+> `--quant` 参数可启用 GRQ 量化（需要 CUDA 环境），校准数据默认使用 `datasets/llm_quant.json`，可通过 `--cali_dataset` 指定。
 
 ### 1.2 导出 LLM RKNN 模型
 
@@ -41,7 +39,7 @@ python export_rknn.py \
     --platform rk1820
 ```
 
-RKNN 转换默认使用 W4A16 量化，采用 GRQ + group32 方式：
+RKNN 转换默认使用 W4A16 量化，采用 group32 方式（`do_quantization=True` 时 toolkit 会自动进行量化，无需提供量化数据集）：
 
 ```python
 rknn.config(target_platform=args.platform,

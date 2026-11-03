@@ -1,0 +1,1 @@
+<table><tr><td></td><td>$\omega_{1}$</td><td>$\omega_{2}$</td><td>$\omega_{3}$</td><td>$\omega_{4}$</td></tr><tr><td>P[\{ω\}]</td><td>0.2</td><td>0.6</td><td>0.1</td><td>0.1</td></tr><tr><td>$\Delta R^{1}(\omega)$</td><td>-0.5</td><td>0.5</td><td>1</td><td>1.2</td></tr><tr><td>$\Delta R^{2}(\omega)$</td><td>-0.5</td><td>0.5</td><td>1.2</td><td>1</td></tr></table>

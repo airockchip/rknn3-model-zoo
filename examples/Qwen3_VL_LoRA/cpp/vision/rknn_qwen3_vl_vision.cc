@@ -47,8 +47,80 @@ static void dump_tensor_attr(rknn3_tensor_attr* attrs)
            rknn3_get_type_string(attrs->dtype), attrs->core_id, rknn3_get_qnt_type_string(attrs->qnt_type));
 }
 
+// 多卡/多设备场景下可通过环境变量 RKNN3_DEVICE_ID 指定设备（如 0001:11:00.0）；
+// 未设置时沿用 rknn3 默认行为（使用第一个设备）。
+static int init_rknn3_context(rknn3_context* ctx)
+{
+    const char* device_id = getenv("RKNN3_DEVICE_ID");
+    if (device_id != nullptr && device_id[0] != '\0') {
+        rknn3_init_extend init_extend;
+        memset(&init_extend, 0, sizeof(init_extend));
+        init_extend.device_id = (char*)device_id;
+        printf("Using RKNN3 device: %s\n", device_id);
+        return rknn3_init(ctx, &init_extend);
+    }
+    return rknn3_init(ctx, NULL);
+}
 
-int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, int* deepstack_aligned_size, uint32_t model_width, uint32_t model_height)
+// 在 context 上初始化 vision LoRA：只加载，不启用（base 推理需要保持关闭）
+static int setup_context_lora(rknn3_context ctx, const char* lora_weight_path, rknn3_lora* lora_out)
+{
+    int ret;
+    uint32_t n_lora = 0;
+    rknn3_lora lora_list[RKNN3_MAX_LORA_NUM] = {0};
+
+    ret = rknn3_lora_init(ctx, lora_weight_path);
+    if (ret < 0) {
+        printf("Failed to initialize vision lora on context\n");
+        return ret;
+    }
+
+    ret = rknn3_query(ctx, RKNN3_QUERY_LORA_NUM, &n_lora, sizeof(n_lora));
+    if (ret < 0) {
+        printf("Failed to query vision lora num\n");
+        return ret;
+    }
+    if (n_lora == 0) {
+        printf("No lora found in vision weight file\n");
+        return -1;
+    }
+
+    ret = rknn3_query(ctx, RKNN3_QUERY_LORA_INFO, lora_list, sizeof(lora_list));
+    if (ret < 0) {
+        printf("Failed to query vision lora info\n");
+        return ret;
+    }
+
+    ret = rknn3_lora_load(ctx, &lora_list[0]);
+    if (ret < 0) {
+        printf("Failed to load vision lora\n");
+        return ret;
+    }
+
+    *lora_out = lora_list[0];
+    printf("Vision LoRA loaded: name=%s, scale=%.3f\n", lora_out->lora_name, lora_out->scale);
+    return 0;
+}
+
+// 切换 vision context 上 LoRA 的使能状态；未加载 LoRA 时为空操作
+static int set_vision_lora_enabled(rknn_qwen3_vl_vision_context* vision_ctx, bool enable)
+{
+    if (!vision_ctx->lora_loaded || vision_ctx->lora_enabled == enable) {
+        return 0;
+    }
+
+    int ret = enable ? rknn3_lora_enable(vision_ctx->rknn_ctx, &vision_ctx->lora)
+                     : rknn3_lora_disable(vision_ctx->rknn_ctx, &vision_ctx->lora);
+    if (ret < 0) {
+        printf("Failed to %s vision lora\n", enable ? "enable" : "disable");
+        return ret;
+    }
+    vision_ctx->lora_enabled = enable;
+    printf("Vision LoRA %s\n", enable ? "enabled" : "disabled");
+    return 0;
+}
+
+int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, int* deepstack_aligned_size, uint32_t model_width, uint32_t model_height, const char* lora_weight_path)
 {
     int ret;
     rknn3_context ctx = 0;
@@ -57,8 +129,12 @@ int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* m
     config.run_core_mask = core_mask;
     config.user_mem_internal = 1; // 使用用户管理的internal内存
 
+    vision_ctx->lora_loaded = false;
+    vision_ctx->lora_enabled = false;
+    memset(&vision_ctx->lora, 0, sizeof(vision_ctx->lora));
+
     // RKNN Init
-    ret = rknn3_init(&ctx, NULL);
+    ret = init_rknn3_context(&ctx);
     if (ret < 0)
     {
         printf("rknn_init fail ret=%d\n", ret);
@@ -192,8 +268,34 @@ int init_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, const char* m
     return ret;
 }
 
+int setup_qwen3_vl_vision_lora(rknn_qwen3_vl_vision_context* vision_ctx, const char* lora_weight_path)
+{
+    if (vision_ctx == nullptr || lora_weight_path == nullptr) {
+        return 0;
+    }
+
+    rknn3_lora lora = {0};
+    int ret = setup_context_lora(vision_ctx->rknn_ctx, lora_weight_path, &lora);
+    if (ret < 0) {
+        printf("Warning: vision LoRA setup failed, vision will run as base\n");
+        return ret;
+    }
+    vision_ctx->lora = lora;
+    vision_ctx->lora_loaded = true;
+    return 0;
+}
+
 int release_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx)
 {
+    if (vision_ctx->lora_loaded) {
+        if (vision_ctx->lora_enabled) {
+            rknn3_lora_disable(vision_ctx->rknn_ctx, &vision_ctx->lora);
+            vision_ctx->lora_enabled = false;
+        }
+        rknn3_lora_unload(vision_ctx->rknn_ctx, &vision_ctx->lora);
+        vision_ctx->lora_loaded = false;
+    }
+
     for (int i = 0; i < vision_ctx->io_num.n_input; i++) {
         if (vision_ctx->inputs[i].mem) {
             rknn3_destroy_mem(vision_ctx->rknn_ctx, vision_ctx->inputs[i].mem);
@@ -283,7 +385,7 @@ void transpose(float16 *in, float16 *out, int model_width, int model_height) {
     }}}}}}}}
 }
 
-int inference_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, float16* deepstack_data0, float16* deepstack_data1, float16* deepstack_data2)
+int inference_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, float16* deepstack_data0, float16* deepstack_data1, float16* deepstack_data2, bool use_lora)
 {
     if ((!vision_ctx) || (!img))
     {
@@ -313,6 +415,13 @@ int inference_qwen3_vl_vision(rknn_qwen3_vl_vision_context* vision_ctx, image_bu
     if (ret < 0)
     {
         printf("convert_image fail! ret=%d\n", ret);
+        goto out;
+    }
+
+    // 按需切换 LoRA 使能状态，得到 base / lora 两套 vision embedding
+    ret = set_vision_lora_enabled(vision_ctx, use_lora);
+    if (ret < 0)
+    {
         goto out;
     }
 

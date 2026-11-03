@@ -414,7 +414,7 @@ if __name__ == '__main__':
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     update_config(config, ['use_cache'], False)
     # kwargs['config'] = config
-    model = PaddleOCRVLForConditionalGeneration.from_pretrained(args.model_path, trust_remote_code=True, torch_dtype=torch.float32)
+    model = PaddleOCRVLForConditionalGeneration.from_pretrained(args.model_path, trust_remote_code=True, torch_dtype=torch.float32, attn_implementation="eager")
     model = model.eval()
         
     if args.quant and torch.cuda.is_available():

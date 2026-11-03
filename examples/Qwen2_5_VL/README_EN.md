@@ -98,8 +98,7 @@ python export_vision.py --img_h 392 --img_w 392
 
 The C++ inference code automatically detects the model format and is compatible with both pruned and full models without code modification.
 
-The C++ demo remains compatible with the original command line. To enable SpeedUP,
-append the optional `speedup_ratio` argument:
+The C++ demo remains compatible with the original command line. To use SpeedUP, provide its header and library for the target platform, then add `--enable_speedup` to the `build-linux.sh` command. At runtime, append the optional `speedup_ratio` argument:
 
 ```bash
 ./rknn_qwen2_5_vl_demo \

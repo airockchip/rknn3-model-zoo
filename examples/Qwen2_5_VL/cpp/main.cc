@@ -16,7 +16,9 @@
                 Includes
 -------------------------------------------*/
 #include <stdio.h>
+#include <cmath>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -206,15 +208,31 @@ int main(int argc, char **argv)
     uint32_t    model_height       = 0;
     float       speedup_ratio = 1.0f;
     if (argc >= 13) {
-        model_width  = strtoul(argv[11], nullptr, 0);
-        model_height = strtoul(argv[12], nullptr, 0);
+        uint32_t* dimensions[] = {&model_width, &model_height};
+        for (int i = 0; i < 2; ++i) {
+            char* end = NULL;
+            errno = 0;
+            unsigned long value = strtoul(argv[11 + i], &end, 0);
+            if (errno != 0 || end == argv[11 + i] || *end != '\0' ||
+                strchr(argv[11 + i], '-') || value > UINT32_MAX) {
+                printf("model_width and model_height must be integers in [0, UINT32_MAX]\n");
+                return -1;
+            }
+            *dimensions[i] = static_cast<uint32_t>(value);
+        }
     }
     if (argc == 14) {
-        speedup_ratio = atof(argv[13]);
+        char* end = NULL;
+        speedup_ratio = strtof(argv[13], &end);
+        if (end == argv[13] || *end != '\0' || !std::isfinite(speedup_ratio) ||
+            speedup_ratio < 0.0f || speedup_ratio > 1.0f) {
+            printf("speedup_ratio must be a number in [0, 1]\n");
+            return -1;
+        }
     }
     std::string prompt_with_image;
 
-    int ret;
+    int ret = -1;
     rknn_perf_metrics_t perf;
 
 
@@ -333,6 +351,7 @@ int main(int argc, char **argv)
     img_embeds = (float16*)malloc((embed_elems) * sizeof(float16));
     if (img_embeds == NULL) {
         printf("malloc image embeds failed! elems=%zu\n", embed_elems);
+        ret = -1;
         goto out;
     }
 
@@ -372,11 +391,12 @@ int main(int argc, char **argv)
 
     printf_perf(&perf);
 out:
-    ret = release_qwen2_5_vl_model(&rknn_app_ctx);
+    int release_ret = release_qwen2_5_vl_model(&rknn_app_ctx);
 
-    if (ret != 0)
+    if (release_ret != 0)
     {
-        printf("release qwen2_5_vl model fail! ret=%d\n", ret);
+        printf("release qwen2_5_vl model fail! ret=%d\n", release_ret);
+        if (ret == 0) ret = release_ret;
     }
 
     if (embedding_info.fd != -1) {

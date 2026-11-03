@@ -1,3 +1,5 @@
+import glob
+import os
 import numpy as np
 from rknn.api import RKNN
 import onnx
@@ -28,11 +30,44 @@ def _extract_seg_idx(filepath):
     return int(m.group(1))
 
 
+def _segment_onnx_patterns(base_dir, base_name):
+    filename_pattern = f"{base_name}_seg*.onnx"
+    return (
+        os.path.join(base_dir, "seg_*", filename_pattern),
+        os.path.join(base_dir, filename_pattern),
+    )
+
+
+def _find_segment_onnx_files(base_dir, base_name):
+    patterns = _segment_onnx_patterns(base_dir, base_name)
+    for pattern in patterns:
+        seg_files = glob.glob(pattern)
+        if seg_files:
+            return sorted(seg_files, key=_extract_seg_idx), patterns
+    return [], patterns
+
+
+def _resolve_segment_onnx(base_dir, base_name, seg_idx):
+    filename = f"{base_name}_seg{seg_idx}.onnx"
+    candidates = (
+        os.path.join(base_dir, f"seg_{seg_idx}", filename),
+        os.path.join(base_dir, filename),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        f"Segment {seg_idx} ONNX file not found; tried: "
+        + ", ".join(candidates)
+    )
+
+
 def _build_rknn_config(args, is_multi_segment=False, is_last_segment=True):
     from rknn.api import DEFAULT_RKNN_LLM_CONFIG
 
-    kvcache_buffer_len = MAX_CONTEXT_LEN
-    max_position_embeddings = MAX_CONTEXT_LEN
+    max_context_len = getattr(args, "max_context_len", MAX_CONTEXT_LEN)
+    kvcache_buffer_len = max_context_len
+    max_position_embeddings = max_context_len
     my_config = DEFAULT_RKNN_LLM_CONFIG.copy()
 
     attn_config = {
@@ -63,7 +98,17 @@ def _build_rknn_config(args, is_multi_segment=False, is_last_segment=True):
     return my_config
 
 
-def _export_single_segment(rknn, onnx_path, rknn_path, llm_config, dataset_path, config_path=None, rebuild=False):
+def _export_single_segment(
+    rknn,
+    onnx_path,
+    rknn_path,
+    llm_config,
+    dataset_path,
+    config_path=None,
+    rebuild=False,
+    profile_mode=False,
+    save_ctx=False,
+):
     print('--> config model')
     onnx_model = onnx.load(onnx_path, load_external_data=False)
     dynamic_shapes = []
@@ -89,7 +134,7 @@ def _export_single_segment(rknn, onnx_path, rknn_path, llm_config, dataset_path,
 
     rknn.config(
         target_platform='rk1820', dynamic_input=dynamic_input,
-        profile_mode=False, quantized_dtype='w4a16',
+        profile_mode=profile_mode, quantized_dtype='w4a16',
         quantized_algorithm='normal', quantized_method='group32',
         llm_config=llm_config,
     )
@@ -117,7 +162,7 @@ def _export_single_segment(rknn, onnx_path, rknn_path, llm_config, dataset_path,
         print('done')
 
     print('--> Export RKNN model')
-    ret = rknn.export_rknn(rknn_path)
+    ret = rknn.export_rknn(rknn_path, save_ctx=save_ctx)
     if ret != 0:
         print('Export rknn failed!')
         sys.exit(ret)
@@ -125,15 +170,40 @@ def _export_single_segment(rknn, onnx_path, rknn_path, llm_config, dataset_path,
 
 
 if __name__ == '__main__':
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, BooleanOptionalAction
     parser = ArgumentParser(description="Export Gemma4Unified LLM to RKNN model")
     parser.add_argument("--onnx_path", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--rknn_path", type=str, default=None)
     parser.add_argument("--dataset_path", type=str, default=DATASET_PATH)
     parser.add_argument("--model_type", type=str, choices=['12b'], default='12b')
+    parser.add_argument(
+        "--max_context_len",
+        "--max-context-len",
+        type=int,
+        default=MAX_CONTEXT_LEN,
+        help="maximum KV cache/context length (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--profile_mode",
+        action=BooleanOptionalAction,
+        default=False,
+        help="enable per-layer dump support for runtime accuracy analysis (default: disabled)",
+    )
+    parser.add_argument(
+        "--save_ctx",
+        action=BooleanOptionalAction,
+        default=False,
+        help="save the RKNN context required by load_rknn(load_ctx=True) (default: disabled)",
+    )
     parser.add_argument("--multi_segment", action='store_true')
     parser.add_argument("--num_segments", type=int, default=0)
+    parser.add_argument(
+        "--stop_after_segment",
+        type=int,
+        default=None,
+        help="stop after this zero-based segment while preserving the full layout",
+    )
     parser.add_argument('--rebuild', action='store_true', default=False)
     args = parser.parse_args()
 
@@ -142,27 +212,37 @@ if __name__ == '__main__':
     args.config = args.config or cfg['config_path']
     args.rknn_path = args.rknn_path or cfg['rknn_path']
 
-    import os
-
     if args.multi_segment:
         segment_count = args.num_segments
+
         base_dir = os.path.dirname(args.onnx_path)
         base_name = os.path.splitext(os.path.basename(args.onnx_path))[0]
         rknn_output_dir = os.path.dirname(args.rknn_path) or '.'
 
         if segment_count <= 0:
-            import glob
-            pattern = os.path.join(base_dir, f"{base_name}_seg*.onnx")
-            seg_files = glob.glob(pattern)
+            seg_files, patterns = _find_segment_onnx_files(base_dir, base_name)
             if not seg_files:
-                print(f"No segment files found matching {pattern}")
+                print(
+                    "No segment files found matching: " + ", ".join(patterns),
+                    file=sys.stderr,
+                )
                 sys.exit(1)
-            seg_files.sort(key=_extract_seg_idx)
             segment_count = len(seg_files)
             print(f"Found {segment_count} segments")
 
-        for seg_idx in range(segment_count):
-            seg_onnx = os.path.join(base_dir, f"seg_{seg_idx}", f"{base_name}_seg{seg_idx}.onnx")
+        if args.stop_after_segment is not None and not 0 <= args.stop_after_segment < segment_count:
+            raise ValueError(
+                "--stop_after_segment must be within the segment range: "
+                f"0 <= {args.stop_after_segment} < {segment_count}"
+            )
+        segment_limit = (
+            segment_count
+            if args.stop_after_segment is None
+            else args.stop_after_segment + 1
+        )
+
+        for seg_idx in range(segment_limit):
+            seg_onnx = _resolve_segment_onnx(base_dir, base_name, seg_idx)
             seg_rknn = os.path.join(rknn_output_dir, f"{base_name}_seg{seg_idx}.rknn")
             is_last = (seg_idx == segment_count - 1)
             tmp_dir = os.path.join(os.getcwd(), "tmp")
@@ -176,7 +256,17 @@ if __name__ == '__main__':
             try:
                 print(f'\n--> Exporting segment {seg_idx + 1}/{segment_count} (last={is_last}): {seg_onnx}')
                 seg_config = _build_rknn_config(args, is_multi_segment=True, is_last_segment=is_last)
-                _export_single_segment(rknn, seg_onnx, seg_rknn, seg_config, args.dataset_path, args.config, rebuild=args.rebuild)
+                _export_single_segment(
+                    rknn,
+                    seg_onnx,
+                    seg_rknn,
+                    seg_config,
+                    args.dataset_path,
+                    args.config,
+                    rebuild=args.rebuild,
+                    profile_mode=args.profile_mode,
+                    save_ctx=args.save_ctx,
+                )
             finally:
                 rknn.release()
             if os.path.isdir(tmp_dir):
@@ -184,10 +274,25 @@ if __name__ == '__main__':
                     shutil.rmtree(tmp_seg_dir)
                 shutil.move(tmp_dir, tmp_seg_dir)
                 print(f'--> Renamed tmp -> tmp_seg{seg_idx}')
+            if args.stop_after_segment is not None and seg_idx >= args.stop_after_segment:
+                print(
+                    f"Stopping after segment {seg_idx} as requested by "
+                    "--stop_after_segment"
+                )
     else:
         rknn = RKNN(verbose=False)
         try:
             config = _build_rknn_config(args, is_multi_segment=False)
-            _export_single_segment(rknn, args.onnx_path, args.rknn_path, config, args.dataset_path, args.config, rebuild=args.rebuild)
+            _export_single_segment(
+                rknn,
+                args.onnx_path,
+                args.rknn_path,
+                config,
+                args.dataset_path,
+                args.config,
+                rebuild=args.rebuild,
+                profile_mode=args.profile_mode,
+                save_ctx=args.save_ctx,
+            )
         finally:
             rknn.release()

@@ -22,6 +22,7 @@
 //   4. decode0 生成 cross-attention 的 key/value
 //   5. decoder1 自回归生成 token，最终解码为文本
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,46 @@
 #include "process.h"
 #include "rknn3_api.h"
 #include "whisper.h"
+// Model config: max_target_positions=448 for both supported variants.
+static constexpr int WHISPER_MAX_TARGET_POSITIONS = 448;
+static constexpr int WHISPER_PROMPT_TOKENS = 4;
+// Prefill produces the first new token without an additional decoder position.
+static constexpr int WHISPER_MAX_NEW_TOKENS = WHISPER_MAX_TARGET_POSITIONS - WHISPER_PROMPT_TOKENS + 1;
+static constexpr uint32_t WHISPER_KVCACHE_RESIDUAL_DEPTH = 32;
+struct WhisperModelConfig
+{
+  int vocab_size;
+  int n_mels;
+  int32_t transcribe_token;
+  int32_t no_timestamps_token;
+  const char *mel_filters_path;
+};
+
+static const WhisperModelConfig base_config = {
+    51865, 80, 50359, 50363, "./model/mel_80_filters.txt"
+};
+static const WhisperModelConfig turbo_config = {
+    51866, 128, 50360, 50364, "./model/mel_128_filters.txt"
+};
+
+static bool parse_max_new_tokens(const char *value, int *result)
+{
+  if (!value || !value[0]) return false;
+  for (const char *p = value; *p; ++p)
+  {
+    if (*p < '0' || *p > '9') return false;
+  }
+  errno = 0;
+  char *end = NULL;
+  long parsed = strtol(value, &end, 10);
+  if (errno == ERANGE || *end != '\0' || parsed < 1 || parsed > WHISPER_MAX_NEW_TOKENS)
+  {
+    return false;
+  }
+  *result = (int)parsed;
+  return true;
+}
+
 // 判断字符串 value 是否以 prefix 开头
 static bool starts_with(const char *value, const char *prefix)
 {
@@ -124,9 +165,14 @@ static bool parse_core_mask_hex(const char *value, uint32_t *out)
     return false;
   }
 
+  if (value[0] == '-' || value[0] == '+' || isspace((unsigned char)value[0]))
+  {
+    return false;
+  }
+  errno = 0;
   char *end = nullptr;
   unsigned long mask = strtoul(value, &end, 16);
-  if (end == value || *end != '\0' || mask == 0)
+  if (errno == ERANGE || end == value || *end != '\0' || mask == 0 || mask > UINT32_MAX)
   {
     return false;
   }
@@ -135,7 +181,7 @@ static bool parse_core_mask_hex(const char *value, uint32_t *out)
   return true;
 }
 
-static uint32_t calc_valid_encoder_frames(const audio_buffer_t *audio)
+static uint32_t calc_valid_encoder_frames(const audio_buffer_t *audio, uint32_t max_audio_length)
 {
   if (!audio || audio->num_frames <= 0)
   {
@@ -143,9 +189,9 @@ static uint32_t calc_valid_encoder_frames(const audio_buffer_t *audio)
   }
 
   uint32_t valid_audio_samples = (uint32_t)audio->num_frames;
-  if (valid_audio_samples > MAX_AUDIO_LENGTH)
+  if (valid_audio_samples > max_audio_length)
   {
-    valid_audio_samples = MAX_AUDIO_LENGTH;
+    valid_audio_samples = max_audio_length;
   }
 
   // process.cc 里有效 mel 帧数是 audio_length / HOP_LENGTH
@@ -154,7 +200,7 @@ static uint32_t calc_valid_encoder_frames(const audio_buffer_t *audio)
   // Whisper encoder conv2 stride=2: 3000 mel frames -> 1500 encoder frames
   uint32_t valid_encoder_frames = (valid_mel_frames + 1) / 2;
 
-  uint32_t max_encoder_frames = MAX_AUDIO_LENGTH / HOP_LENGTH / 2;
+  uint32_t max_encoder_frames = max_audio_length / HOP_LENGTH / 2;
   if (valid_encoder_frames > max_encoder_frames)
   {
     valid_encoder_frames = max_encoder_frames;
@@ -236,7 +282,8 @@ static void fill_encoder_mask_values(std::vector<float> &mask, const rknn3_tenso
   }
 }
 
-static int fill_encoder_attention_mask(rknn_app_context_t *encoder_ctx, const audio_buffer_t *audio)
+static int fill_encoder_attention_mask(rknn_app_context_t *encoder_ctx, const audio_buffer_t *audio,
+                                       uint32_t max_audio_length, bool is_turbo)
 {
   if (!encoder_ctx)
   {
@@ -272,11 +319,11 @@ static int fill_encoder_attention_mask(rknn_app_context_t *encoder_ctx, const au
     ENCODER_MASK_DELAY_HARD = 2,
   };
 
-  static EncoderMaskMode g_encoder_mask_mode = ENCODER_MASK_DELAY_HARD;
-  static uint32_t g_encoder_mask_margin_frames = 250;  // 约 5 秒，因为 encoder 50fps
-  static float g_encoder_mask_pad_value = -10.0f;
+  const EncoderMaskMode encoder_mask_mode = is_turbo ? ENCODER_MASK_ZERO : ENCODER_MASK_DELAY_HARD;
+  const uint32_t encoder_mask_margin_frames = 250;  // 约 5 秒，因为 encoder 50fps
+  const float encoder_mask_pad_value = -10.0f;
 
-  uint32_t valid_encoder_frames = calc_valid_encoder_frames(audio);
+  uint32_t valid_encoder_frames = calc_valid_encoder_frames(audio, max_audio_length);
   uint32_t encoder_seq_len = get_encoder_mask_seq_len(mask_tensor->attr);
 
   if (valid_encoder_frames > encoder_seq_len)
@@ -286,31 +333,31 @@ static int fill_encoder_attention_mask(rknn_app_context_t *encoder_ctx, const au
 
   uint32_t mask_start = encoder_seq_len;
 
-  if (g_encoder_mask_mode == ENCODER_MASK_ZERO)
+  if (encoder_mask_mode == ENCODER_MASK_ZERO)
   {
     mask_start = encoder_seq_len;
   }
-  else if (g_encoder_mask_mode == ENCODER_MASK_HARD)
+  else if (encoder_mask_mode == ENCODER_MASK_HARD)
   {
     mask_start = valid_encoder_frames;
   }
-  else if (g_encoder_mask_mode == ENCODER_MASK_DELAY_HARD)
+  else if (encoder_mask_mode == ENCODER_MASK_DELAY_HARD)
   {
-    mask_start = valid_encoder_frames + g_encoder_mask_margin_frames;
+    mask_start = valid_encoder_frames + encoder_mask_margin_frames;
     if (mask_start > encoder_seq_len)
     {
       mask_start = encoder_seq_len;
     }
   }
 
-  fill_encoder_mask_values(mask, mask_tensor->attr, mask_start, encoder_seq_len, g_encoder_mask_pad_value);
+  fill_encoder_mask_values(mask, mask_tensor->attr, mask_start, encoder_seq_len, encoder_mask_pad_value);
 
   printf("[encoder mask] mode=%d valid_frames=%u mask_start=%u seq_len=%u pad_value=%.1f\n",
-       (int)g_encoder_mask_mode,
+       (int)encoder_mask_mode,
        valid_encoder_frames,
        mask_start,
        encoder_seq_len,
-       g_encoder_mask_pad_value);
+       encoder_mask_pad_value);
   whisper_print_tensor_shape_brief("[encoder mask attr]", mask_tensor->attr);
 
   memset(mask_tensor->mem->virt_addr, 0, mask_tensor->mem->size);
@@ -424,14 +471,6 @@ struct Decoder1RawRuntime
 // ============================================================================
 // Whisper 特殊 Token 定义
 // ============================================================================
-
-static const int32_t WHISPER_EOT_TOKEN = 50257;              // 结束符 (End of Text)
-static const int32_t WHISPER_SOT_TOKEN = 50258;              // 起始符 (Start of Text)
-static const int32_t WHISPER_TASK_EN_TOKEN = 50259;          // 英语任务标记
-static const int32_t WHISPER_TASK_ZH_TOKEN = 50260;          // 中文任务标记
-static const int32_t WHISPER_TRANSCRIBE_TOKEN = 50359;       // 转写任务标记
-static const int32_t WHISPER_NO_TIMESTAMPS_TOKEN = 50363;    // 不输出时间戳标记
-static const int32_t WHISPER_TIMESTAMP_BEGIN_TOKEN = 50364;  // 时间戳起始标记（>=此值均为时间戳 token）
 
 static const char *DECODER1_SCALAR_INPUT_NAMES[5] = {
     "Th",
@@ -707,10 +746,27 @@ for (uint32_t i = 0; i < ctx->io_num.n_output; ++i)
 {
   *ctx->outputs[i].attr = runtime->shapes[shape_id].outputs[i];
 
+  // A previous decode shape may have shrunk the output allocation. Grow it
+  // again before switching back to a larger prefill shape.
+  if (!ctx->outputs[i].mem || ctx->outputs[i].mem->size < ctx->outputs[i].attr->aligned_size)
+  {
+    ret = whisper_recreate_tensor_mem_exact(ctx->rknn_ctx,
+                                    &ctx->outputs[i],
+                                    ctx->outputs[i].attr->aligned_size,
+                                    ctx->outputs[i].attr->core_id);
+    if (ret != 0)
+    {
+      printf("stage=decoder1_switch grow output mem failed index=%u ret=%d shape_id=%u\n", i, ret, shape_id);
+      return ret;
+    }
+    continue;
+  }
+
   if (i == 0 &&
       shape_id == runtime->decode_shape_id &&
       (runtime->shape_mode == DECODER1_SHAPE_AUTO ||
-       runtime->shape_mode == DECODER1_SHAPE1_ONLY))
+       runtime->shape_mode == DECODER1_SHAPE1_ONLY) &&
+      ctx->outputs[i].mem->size != ctx->outputs[i].attr->aligned_size)
   {
     ret = whisper_recreate_tensor_mem_exact(ctx->rknn_ctx,
                                     &ctx->outputs[i],
@@ -734,16 +790,6 @@ for (uint32_t i = 0; i < ctx->io_num.n_output; ++i)
     continue;
   }
 
-  if (!ctx->outputs[i].mem || ctx->outputs[i].mem->size < ctx->outputs[i].attr->aligned_size)
-  {
-    printf("stage=decoder1_switch output mem too small index=%u name=%s need=%lu actual=%lu shape_id=%u shape_mode=%s\n",
-           i, ctx->outputs[i].attr->name, ctx->outputs[i].attr->aligned_size,
-           ctx->outputs[i].mem ? ctx->outputs[i].mem->size : 0,
-           shape_id,
-           decoder1_shape_mode_name(runtime->shape_mode));
-    whisper_print_tensor_shape_brief("  output", ctx->outputs[i].attr);
-    return -1;
-  }
 }
 
   runtime->has_current_shape = true;
@@ -764,6 +810,37 @@ for (uint32_t i = 0; i < ctx->io_num.n_output; ++i)
 static int fill_decoder1_raw_scalar_inputs(rknn_app_context_t *decoder1_ctx, Decoder1RawRuntime *runtime,
                                            int32_t th, int32_t tc, int32_t ts, int32_t tsr, int32_t num_logits)
 {
+  int control_index = whisper_find_input_index_by_name(decoder1_ctx, "control_variables");
+  if (control_index >= 0)
+  {
+    rknn3_tensor *tensor = &decoder1_ctx->inputs[control_index];
+    // Sequential decoding, no pinned prefix or cache rollback. The FP16
+    // residual holds the last incomplete 32-token block.
+    if (decoder1_ctx->kvcache_residual_depth != WHISPER_KVCACHE_RESIDUAL_DEPTH || th < 0 || th + tc > WHISPER_MAX_TARGET_POSITIONS)
+    {
+      return -1;
+    }
+    int32_t stored = (th / 32) * 32;
+    const int32_t values[9] = {th, tc, 0, 0, stored ? 0 : -1, stored, th % 32, th, 1};
+    if (!tensor->attr || !tensor->mem || tensor->attr->dtype != RKNN3_TENSOR_INT32 ||
+        tensor->attr->n_dims != 2 || tensor->attr->shape[0] != 1 ||
+        tensor->attr->shape[1] != 9)
+    {
+      return -1;
+    }
+    memset(tensor->mem->virt_addr, 0, tensor->mem->size);
+    int32_t *data = reinterpret_cast<int32_t *>(tensor->mem->virt_addr);
+    for (uint32_t i = 0; i < 9; ++i)
+    {
+      data[i * tensor->attr->stride[1]] = values[i];
+    }
+    int ret = rknn3_mem_sync(decoder1_ctx->rknn_ctx, tensor->mem, RKNN3_MEMORY_SYNC_TO_DEVICE);
+    if (ret != RKNN3_SUCCESS) return ret;
+    int index = whisper_find_input_index_by_name(decoder1_ctx, "num_logits_to_keep");
+    return index < 0 ? 0 : whisper_fill_int32_scalar_tensor(
+        decoder1_ctx->rknn_ctx, &decoder1_ctx->inputs[index], num_logits);
+  }
+
   struct ScalarInput
   {
     int32_t value;
@@ -1107,7 +1184,7 @@ static int select_next_token_from_tensor(rknn3_tensor *tensor, uint32_t vocab_si
   }
   int max_id = -1;
   float max_value = 0.0f;
-  uint32_t scan_vocab = std::min<uint32_t>(vocab_size, (uint32_t)WHISPER_SOT_TOKEN);
+  uint32_t scan_vocab = std::min<uint32_t>(vocab_size, (uint32_t)whisper_tokens::SOT);
   if (scan_vocab == 0)
   {
     printf("select_next_token_from_tensor empty vocab tensor=%s vocab_size=%u seq_index=%u\n",
@@ -1348,7 +1425,7 @@ static int choose_decoder1_shape_id(Decoder1RawRuntime *raw_runtime, uint32_t n_
 //   next_token: [输出] 推理结果的下一个 token ID
 static int run_decoder1_raw_tokens(rknn_app_context_t *decoder1_ctx, rknn_app_context_t *decode0_ctx, Decoder1RawRuntime *raw_runtime,
                                    const int32_t *tokens, uint32_t n_tokens, uint32_t start_position,
-                                   const float16 *token_embed, uint32_t hidden_size, int32_t num_logits_to_keep, int *next_token)
+                                   const float16 *token_embed, uint32_t hidden_size, int32_t num_logits_to_keep, int *next_token, uint32_t vocab_size)
 {
   if (!decoder1_ctx || !decode0_ctx || !tokens || n_tokens == 0 || !next_token || !token_embed || hidden_size == 0)
   {
@@ -1464,7 +1541,9 @@ static int run_decoder1_raw_tokens(rknn_app_context_t *decoder1_ctx, rknn_app_co
     return ret;
   }
 
-  ret = fill_decoder1_raw_scalar_inputs(decoder1_ctx, raw_runtime, (int32_t)start_position, (int32_t)n_tokens, 0, 0, num_logits_to_keep);
+  int32_t total_seq = (int32_t)start_position + (int32_t)n_tokens;
+  ret = fill_decoder1_raw_scalar_inputs(decoder1_ctx, raw_runtime, (int32_t)start_position, (int32_t)n_tokens,
+                                        total_seq, total_seq, num_logits_to_keep);
   if (ret != 0)
   {
     printf("run_decoder1_raw_tokens fill scalar inputs failed ret=%d shape_id=%u shape_mode=%s n_tokens=%u start_position=%u num_logits_to_keep=%d token0=%d\n",
@@ -1526,7 +1605,7 @@ static int run_decoder1_raw_tokens(rknn_app_context_t *decoder1_ctx, rknn_app_co
   }
 
   uint32_t logits_seq_index = n_tokens > 0 ? n_tokens - 1 : 0;
-  *next_token = select_next_token_from_tensor(&decoder1_ctx->outputs[0], VOCAB_NUM, logits_seq_index, raw_runtime);
+  *next_token = select_next_token_from_tensor(&decoder1_ctx->outputs[0], vocab_size, logits_seq_index, raw_runtime);
   if (*next_token < 0)
   {
     printf("run_decoder1_raw_tokens select_next_token_from_tensor failed ret=-1 shape_id=%u shape_mode=%s n_tokens=%u start_position=%u num_logits_to_keep=%d token0=%d output_index=0 name=%s\n",
@@ -1547,7 +1626,7 @@ static int run_decoder1_raw_tokens(rknn_app_context_t *decoder1_ctx, rknn_app_co
 // num_logits_to_keep 与 python/test.py 保持一致，传当前 seq_len/chunk，而不是最后一个 token 下标
 static int run_decoder1_raw_prefill_chunks(rknn_app_context_t *decoder1_ctx, rknn_app_context_t *decode0_ctx, Decoder1RawRuntime *raw_runtime,
                                            const int32_t *tokens, uint32_t total_tokens, uint32_t start_position,
-                                           const float16 *token_embed, uint32_t hidden_size, int *next_token)
+                                           const float16 *token_embed, uint32_t hidden_size, int *next_token, uint32_t vocab_size)
 {
   if (!tokens || total_tokens == 0 || !next_token)
   {
@@ -1591,7 +1670,7 @@ static int run_decoder1_raw_prefill_chunks(rknn_app_context_t *decoder1_ctx, rkn
     ret = run_decoder1_raw_tokens(decoder1_ctx, decode0_ctx, raw_runtime,
                                   tokens + offset, chunk, position,
                                   token_embed, hidden_size,
-                                  num_logits_to_keep, next_token);
+                                  num_logits_to_keep, next_token, vocab_size);
     if (ret != 0)
     {
       printf("run_decoder1_raw_prefill_chunks failed ret=%d offset=%u chunk=%u remaining=%u position=%u total_tokens=%u\n",
@@ -1612,7 +1691,7 @@ static int run_decoder1_raw_prefill_chunks(rknn_app_context_t *decoder1_ctx, rkn
     ret = run_decoder1_raw_tokens(decoder1_ctx, decode0_ctx, raw_runtime,
                                   tokens + offset, 1, position,
                                   token_embed, hidden_size,
-                                  num_logits_to_keep, next_token);
+                                  num_logits_to_keep, next_token, vocab_size);
     if (ret != 0)
     {
       printf("run_decoder1_raw_prefill_chunks tail failed ret=%d offset=%u remaining=%u position=%u total_tokens=%u\n",
@@ -1637,12 +1716,243 @@ static int run_decoder1_raw_prefill_chunks(rknn_app_context_t *decoder1_ctx, rkn
 //   6. 将 token 序列解码为文本输出
 //   7. 释放所有资源
 // ============================================================================
+struct WhisperAudioOptions
+{
+  const char *encoder_model;
+  const char *encoder_weight;
+  const char *decode0_model;
+  const char *decode0_weight;
+  const char *decoder1_model;
+  const char *token_embed_path;
+  const char *task;
+  const WhisperModelConfig &model;
+  int max_audio_length;
+  int max_new_tokens;
+  bool is_turbo;
+};
+
+// The caller frees audio.data, including when preprocessing or inference fails.
+static int process_single_audio(const char *audio_path, audio_buffer_t &audio,
+                                rknn_app_context_t &encoder_ctx, rknn_app_context_t &decode0_ctx,
+                                rknn_app_context_t &decoder1_ctx, Decoder1RawRuntime &raw_runtime,
+                                float *mel_filters, std::vector<VocabEntry> &vocab,
+                                const float16 *token_embed, uint32_t hidden_size,
+                                const WhisperAudioOptions &options)
+{
+  int ret = 0;
+  WhisperStreamState stream_state = {};
+  TIMER infer_timer;
+  float infer_time = 0.0f;
+  float audio_length = 0.0f;
+  ret = read_audio(audio_path, &audio);
+  if (ret != 0)
+  {
+    printf("stage=read_audio failed ret=%d audio_path=%s\n", ret, audio_path);
+    return ret;
+  }
+  if (audio.num_channels == 2)
+  {
+    ret = convert_channels(&audio);
+    if (ret != 0)
+    {
+      printf("stage=preprocess convert_channels failed ret=%d audio_path=%s channels=%d\n",
+             ret, audio_path, audio.num_channels);
+      return ret;
+    }
+  }
+  if (audio.sample_rate != SAMPLE_RATE)
+  {
+    ret = resample_audio(&audio, audio.sample_rate, SAMPLE_RATE);
+    if (ret != 0)
+    {
+      printf("stage=preprocess resample_audio failed ret=%d audio_path=%s src_sr=%d dst_sr=%d\n",
+             ret, audio_path, audio.sample_rate, SAMPLE_RATE);
+      return ret;
+    }
+  }
+  audio_length = audio.num_frames / (float)SAMPLE_RATE;
+  audio_length = std::min(audio_length, ((float)options.max_audio_length / SAMPLE_RATE));
+
+  std::vector<float> mel_data(options.model.n_mels * options.max_audio_length / HOP_LENGTH, 0.0f);
+  audio_preprocess(&audio, mel_filters, mel_data, options.model.n_mels, options.max_audio_length);
+
+  if (encoder_ctx.io_num.n_input < 1 || encoder_ctx.io_num.n_output < 1 || decode0_ctx.io_num.n_input < 1 || decode0_ctx.io_num.n_output < 1)
+  {
+    printf("stage=preprocess encoder/decode0 model IO is invalid ret=-1 encoder_in=%d encoder_out=%d decode0_in=%d decode0_out=%d\n",
+           encoder_ctx.io_num.n_input, encoder_ctx.io_num.n_output, decode0_ctx.io_num.n_input, decode0_ctx.io_num.n_output);
+    ret = -1;
+    return ret;
+  }
+
+  infer_timer.tik();
+
+  int encoder_x_index = whisper_require_input_index(&encoder_ctx, "encoder", "x", 0);
+  if (encoder_x_index < 0)
+  {
+    ret = -1;
+    printf("stage=encoder missing required input name=x fallback_index=0 ret=%d model=%s weight=%s\n",
+           ret, options.encoder_model, options.encoder_weight ? options.encoder_weight : "NULL");
+    return ret;
+  }
+
+  rknn3_tensor_attr *encoder_in_attr = encoder_ctx.inputs[encoder_x_index].attr;
+  if (!encoder_in_attr)
+  {
+    ret = -1;
+    printf("stage=encoder invalid input attr model=%s input_index=%d name=x\n", options.encoder_model, encoder_x_index);
+    return ret;
+  }
+  uint32_t encoder_input_elems = whisper_shape_count(encoder_in_attr);
+  uint32_t copy_elems = (uint32_t)mel_data.size() < encoder_input_elems ? (uint32_t)mel_data.size() : encoder_input_elems;
+
+  memset(encoder_ctx.inputs[encoder_x_index].mem->virt_addr, 0, encoder_ctx.inputs[encoder_x_index].mem->size);
+  ret = whisper_convert_fp32_to_tensor(mel_data.data(), encoder_ctx.inputs[encoder_x_index].mem->virt_addr, copy_elems, encoder_in_attr->dtype);
+  if (ret != 0)
+  {
+    printf("stage=preprocess convert_fp32_to_tensor failed ret=%d model=%s input_index=%d name=%s dtype=%s copy_elems=%u audio_path=%s\n",
+           ret,
+           options.encoder_model,
+           encoder_x_index,
+           encoder_ctx.inputs[encoder_x_index].attr ? encoder_ctx.inputs[encoder_x_index].attr->name : "<null>",
+           rknn3_get_type_string(encoder_in_attr->dtype),
+           copy_elems,
+           audio_path);
+    return ret;
+  }
+
+  ret = rknn3_mem_sync(encoder_ctx.rknn_ctx, encoder_ctx.inputs[encoder_x_index].mem, RKNN3_MEMORY_SYNC_TO_DEVICE);
+  if (ret != RKNN3_SUCCESS)
+  {
+    printf("stage=preprocess encoder input sync failed ret=%d model=%s input_index=%d name=%s mem_size=%lu audio_path=%s\n",
+           ret,
+           options.encoder_model,
+           encoder_x_index,
+           encoder_ctx.inputs[encoder_x_index].attr ? encoder_ctx.inputs[encoder_x_index].attr->name : "<null>",
+           (unsigned long)encoder_ctx.inputs[encoder_x_index].mem->size,
+           audio_path);
+    whisper_print_tensor_shape_brief("  encoder input", encoder_ctx.inputs[encoder_x_index].attr);
+    return ret;
+  }
+
+  ret = fill_encoder_attention_mask(&encoder_ctx, &audio, options.max_audio_length, options.is_turbo);
+  if (ret != 0)
+  {
+    printf("stage=preprocess fill_encoder_attention_mask failed ret=%d model=%s audio_path=%s\n", ret, options.encoder_model, audio_path);
+    return ret;
+  }
+
+  ret = rknn3_run(encoder_ctx.rknn_ctx, encoder_ctx.inputs, encoder_ctx.io_num.n_input, encoder_ctx.outputs, encoder_ctx.io_num.n_output);
+  if (ret != RKNN3_SUCCESS)
+  {
+    printf("stage=encoder run failed ret=%d model=%s audio_path=%s\n", ret, options.encoder_model, audio_path);
+    return ret;
+  }
+  ret = sync_all_outputs_from_device(&encoder_ctx, "encoder");
+  if (ret != 0)
+  {
+    printf("stage=encoder output sync failed ret=%d model=%s audio_path=%s\n", ret, options.encoder_model, audio_path);
+    return ret;
+  }
+
+  int decode0_encoder_index = whisper_require_input_index(&decode0_ctx, "decode0", "encoder_outputs", 0);
+  if (decode0_encoder_index < 0)
+  {
+    ret = -1;
+    printf("stage=decode0 missing required input name=encoder_outputs fallback_index=0 ret=%d model=%s weight=%s\n",
+           ret, options.decode0_model, options.decode0_weight ? options.decode0_weight : "NULL");
+    return ret;
+  }
+  ret = whisper_copy_tensor_data(decode0_ctx.rknn_ctx, &decode0_ctx.inputs[decode0_encoder_index], &encoder_ctx.outputs[0]);
+  if (ret != 0)
+  {
+    printf("stage=decode0 copy encoder output failed ret=%d input_index=%d name=%s src_name=%s model=%s\n",
+           ret,
+           decode0_encoder_index,
+           decode0_ctx.inputs[decode0_encoder_index].attr ? decode0_ctx.inputs[decode0_encoder_index].attr->name : "<null>",
+           encoder_ctx.outputs[0].attr ? encoder_ctx.outputs[0].attr->name : "<null>",
+           options.decode0_model);
+    return ret;
+  }
+
+  ret = rknn3_run(decode0_ctx.rknn_ctx, decode0_ctx.inputs, decode0_ctx.io_num.n_input, decode0_ctx.outputs, decode0_ctx.io_num.n_output);
+  if (ret != RKNN3_SUCCESS)
+  {
+    printf("stage=decode0 run failed ret=%d model=%s audio_path=%s\n", ret, options.decode0_model, audio_path);
+    return ret;
+  }
+  ret = sync_all_outputs_from_device(&decode0_ctx, "decode0");
+  if (ret != 0)
+  {
+    printf("stage=decode0 output sync failed ret=%d model=%s audio_path=%s\n", ret, options.decode0_model, audio_path);
+    return ret;
+  }
+
+  std::vector<int32_t> prompt_tokens = {
+      whisper_tokens::SOT,
+      strcmp(options.task, "en") == 0 ? whisper_tokens::TASK_EN : whisper_tokens::TASK_ZH,
+      options.model.transcribe_token,
+      options.model.no_timestamps_token,
+  };
+
+  int next_token = -1;
+  printf("\n---- whisper raw decode ----\n");
+  ret = run_decoder1_raw_prefill_chunks(&decoder1_ctx, &decode0_ctx, &raw_runtime, prompt_tokens.data(), (uint32_t)prompt_tokens.size(), 0, token_embed, hidden_size, &next_token, options.model.vocab_size);
+  if (ret != 0)
+  {
+    printf("stage=decoder1 prefill failed ret=%d model=%s audio_path=%s token_embed_path=%s shape_mode=%s n_tokens=%zu start_position=0\n",
+           ret,
+           options.decoder1_model,
+           audio_path,
+           options.token_embed_path,
+           decoder1_shape_mode_name(raw_runtime.shape_mode),
+           prompt_tokens.size());
+    return ret;
+  }
+  stream_state.token_ids.push_back(next_token);
+
+  uint32_t position = (uint32_t)prompt_tokens.size();
+  for (int step = 1; step < options.max_new_tokens && next_token != whisper_tokens::EOT; ++step)
+  {
+    int32_t token = next_token;
+    ret = run_decoder1_raw_tokens(&decoder1_ctx, &decode0_ctx, &raw_runtime, &token, 1, position, token_embed, hidden_size, 1, &next_token, options.model.vocab_size);
+    if (ret != 0)
+    {
+      printf("stage=decoder1 decode failed ret=%d step=%d model=%s audio_path=%s token_embed_path=%s shape_mode=%s token=%d position=%u n_new_tokens=%d\n",
+             ret,
+             step,
+             options.decoder1_model,
+             audio_path,
+             options.token_embed_path,
+             decoder1_shape_mode_name(raw_runtime.shape_mode),
+             token,
+             position,
+             options.max_new_tokens);
+      return ret;
+    }
+    stream_state.token_ids.push_back(next_token);
+    ++position;
+  }
+  stream_state.text = decode_whisper_tokens(vocab.data(), stream_state.token_ids, options.task, options.model.vocab_size);
+  infer_timer.tok();
+  infer_time = infer_timer.get_time() / 1000.0f;
+  printf("Whisper output: %s\n", stream_state.text.c_str());
+  if (audio_length > 0.0f)
+  {
+    printf("Inference RTF: %.3f / %.3f = %.3f\n", infer_time, audio_length, infer_time / audio_length);
+  }
+  else
+  {
+    printf("Inference RTF: %.3f / %.3f = n/a\n", infer_time, audio_length);
+  }
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
-  if (argc != 13 && argc != 14)
+  if (argc < 13)
   {
     printf("main_raw invalid argc=%d\n", argc);
-    printf("%s <encoder.rknn> <encoder.weight> <decode0.rknn> <decode0.weight> <decode1.rknn> <decode1.weight> <task:en|zh> <audio.wav> <token_embed.bin> <encoder_core_mask_hex> <decode0_core_mask_hex> <decode1_core_mask_hex> [max_new_tokens]\n", argv[0]);
+    printf("%s <encoder.rknn> <encoder.weight> <decode0.rknn> <decode0.weight> <decode1.rknn> <decode1.weight> <task:en|zh> <audio.wav> <token_embed.bin> <encoder_core_mask_hex> <decode0_core_mask_hex> <decode1_core_mask_hex> [max_new_tokens] [--model-type base|turbo]\n", argv[0]);
     printf("example core masks: 0xff / 0x1 / 0x2 / 0x4; default max_new_tokens=64\n");
     return -1;
   }
@@ -1669,14 +1979,36 @@ int main(int argc, char **argv)
     printf("invalid core mask, please input non-zero hex values, for example: 0xff 0xff 0xff\n");
     return -1;
   }
-  if (argc == 14)
+  bool is_turbo = false;
+  int option_index = 13;
+  if (option_index < argc && argv[option_index][0] != '-')
   {
-    max_new_tokens = atoi(argv[13]);
+    if (!parse_max_new_tokens(argv[option_index], &max_new_tokens))
+    {
+      printf("Invalid max_new_tokens: %s (expected integer in [1, %d])\n",
+             argv[option_index], WHISPER_MAX_NEW_TOKENS);
+      return -1;
+    }
+    ++option_index;
   }
-  if (max_new_tokens <= 0)
+  while (option_index < argc)
   {
-    max_new_tokens = 64;
+    if (strcmp(argv[option_index], "--model-type") != 0 || option_index + 1 >= argc)
+    {
+      printf("Expected --model-type base|turbo\n");
+      return -1;
+    }
+    const char *model_type = argv[option_index + 1];
+    if (strcmp(model_type, "base") != 0 && strcmp(model_type, "turbo") != 0)
+    {
+      printf("Unsupported model type: %s (expected base or turbo)\n", model_type);
+      return -1;
+    }
+    is_turbo = strcmp(model_type, "turbo") == 0;
+    option_index += 2;
   }
+  const WhisperModelConfig &config = is_turbo ? turbo_config : base_config;
+  int max_audio_length = 0;
   printf("Using core masks: encoder=0x%x decode0=0x%x decoder1=0x%x, max_new_tokens=%d\n", encoder_core_mask, decode0_core_mask, decoder1_core_mask, max_new_tokens);
 
   const char *vocab_path = NULL;
@@ -1705,16 +2037,11 @@ int main(int argc, char **argv)
   memset(&decode0_ctx, 0, sizeof(decode0_ctx));
   memset(&decoder1_ctx, 0, sizeof(decoder1_ctx));
   float *mel_filters = NULL;
-  VocabEntry vocab[VOCAB_NUM];
-  memset(vocab, 0, sizeof(vocab));
-  WhisperStreamState stream_state = {};
+  std::vector<VocabEntry> vocab(config.vocab_size, VocabEntry{});
   Decoder1RawRuntime raw_runtime = {};
   std::vector<uint8_t> token_embed_bytes;
   const float16 *token_embed = NULL;
   uint32_t hidden_size = 0;
-  TIMER infer_timer;
-  float infer_time = 0.0f;
-  float audio_length = 0.0f;
 
   do
   {
@@ -1725,6 +2052,28 @@ int main(int argc, char **argv)
              ret, encoder_model, encoder_weight ? encoder_weight : "NULL", encoder_core_mask);
       break;
     }
+
+    const rknn3_tensor_attr *mel_attr = encoder_ctx.io_num.n_input ? encoder_ctx.inputs[0].attr : NULL;
+    if (!mel_attr || (mel_attr->n_dims != 3 && mel_attr->n_dims != 4) ||
+        mel_attr->shape[0] != 1 || (mel_attr->n_dims == 4 && mel_attr->shape[1] != 1) ||
+        mel_attr->shape[mel_attr->n_dims - 2] != (uint32_t)config.n_mels)
+    {
+      printf("Encoder input does not match --model-type %s (%d Mel bins)\n",
+             is_turbo ? "turbo" : "base", config.n_mels);
+      ret = -1;
+      break;
+    }
+    uint32_t mel_frames = mel_attr->shape[mel_attr->n_dims - 1];
+    if (mel_frames == 0 || mel_frames > 3000 || mel_frames % 2 != 0)
+    {
+      printf("Unsupported encoder Mel frame count: %u\n", mel_frames);
+      ret = -1;
+      break;
+    }
+    max_audio_length = mel_frames * HOP_LENGTH;
+    printf("Model type=%s, n_mels=%d, vocab_size=%d, audio window=%.2f s\n",
+           is_turbo ? "turbo" : "base", config.n_mels, config.vocab_size,
+           (float)max_audio_length / SAMPLE_RATE);
 
     ret = init_whisper_model(decode0_model, &decode0_ctx, decode0_weight, decode0_core_mask);
     if (ret != 0)
@@ -1789,7 +2138,7 @@ int main(int argc, char **argv)
       break;
     }
     hidden_size = decoder1_ctx.inputs[embed_input_index].attr->shape[2];
-    uint64_t expected_token_bytes = (uint64_t)VOCAB_NUM * hidden_size * sizeof(float16);
+    uint64_t expected_token_bytes = (uint64_t)config.vocab_size * hidden_size * sizeof(float16);
     if (token_embed_bytes.size() != expected_token_bytes)
     {
       printf("stage=load_token_embed token embed size mismatch ret=-1 path=%s expected=%lu actual=%lu hidden_size=%u input_index=%d name=%s\n",
@@ -1804,232 +2153,33 @@ int main(int argc, char **argv)
     }
     token_embed = reinterpret_cast<const float16 *>(token_embed_bytes.data());
 
-    ret = read_vocab(vocab_path, vocab);
+    ret = read_vocab(vocab_path, vocab.data(), config.vocab_size);
     if (ret != 0)
     {
       printf("stage=load_vocab failed ret=%d vocab_path=%s task=%s\n", ret, vocab_path, task);
       break;
     }
-    ret = read_audio(audio_path, &audio);
-    if (ret != 0)
-    {
-      printf("stage=read_audio failed ret=%d audio_path=%s\n", ret, audio_path);
-      break;
-    }
-    if (audio.num_channels == 2)
-    {
-      ret = convert_channels(&audio);
-      if (ret != 0)
-      {
-        printf("stage=preprocess convert_channels failed ret=%d audio_path=%s channels=%d\n",
-               ret, audio_path, audio.num_channels);
-        break;
-      }
-    }
-    if (audio.sample_rate != SAMPLE_RATE)
-    {
-      ret = resample_audio(&audio, audio.sample_rate, SAMPLE_RATE);
-      if (ret != 0)
-      {
-        printf("stage=preprocess resample_audio failed ret=%d audio_path=%s src_sr=%d dst_sr=%d\n",
-               ret, audio_path, audio.sample_rate, SAMPLE_RATE);
-        break;
-      }
-    }
-    audio_length = audio.num_frames / (float)SAMPLE_RATE;
-    audio_length = std::min(audio_length, (float)CHUNK_LENGTH);
-
-    std::vector<float> mel_data(N_MELS * MAX_AUDIO_LENGTH / HOP_LENGTH, 0.0f);
-    mel_filters = (float *)malloc(N_MELS * MELS_FILTERS_SIZE * sizeof(float));
+    mel_filters = (float *)malloc(config.n_mels * MELS_FILTERS_SIZE * sizeof(float));
     if (!mel_filters)
     {
       ret = -1;
       printf("stage=preprocess mel_filters alloc failed ret=-1 size=%u path=%s\n",
-             N_MELS * MELS_FILTERS_SIZE, MEL_FILTERS_PATH);
+             config.n_mels * MELS_FILTERS_SIZE, config.mel_filters_path);
       break;
     }
-    ret = read_mel_filters(MEL_FILTERS_PATH, mel_filters, N_MELS * MELS_FILTERS_SIZE);
+    ret = read_mel_filters(config.mel_filters_path, mel_filters, config.n_mels * MELS_FILTERS_SIZE);
     if (ret != 0)
     {
-      printf("stage=preprocess read_mel_filters failed ret=%d path=%s\n", ret, MEL_FILTERS_PATH);
-      break;
-    }
-    audio_preprocess(&audio, mel_filters, mel_data);
-    free(mel_filters);
-    mel_filters = NULL;
-
-    if (encoder_ctx.io_num.n_input < 1 || encoder_ctx.io_num.n_output < 1 || decode0_ctx.io_num.n_input < 1 || decode0_ctx.io_num.n_output < 1)
-    {
-      printf("stage=preprocess encoder/decode0 model IO is invalid ret=-1 encoder_in=%d encoder_out=%d decode0_in=%d decode0_out=%d\n",
-             encoder_ctx.io_num.n_input, encoder_ctx.io_num.n_output, decode0_ctx.io_num.n_input, decode0_ctx.io_num.n_output);
-      ret = -1;
+      printf("stage=preprocess read_mel_filters failed ret=%d path=%s\n", ret, config.mel_filters_path);
       break;
     }
 
-    infer_timer.tik();
-
-    int encoder_x_index = whisper_require_input_index(&encoder_ctx, "encoder", "x", 0);
-    if (encoder_x_index < 0)
-    {
-      ret = -1;
-      printf("stage=encoder missing required input name=x fallback_index=0 ret=%d model=%s weight=%s\n",
-             ret, encoder_model, encoder_weight ? encoder_weight : "NULL");
-      break;
-    }
-
-    rknn3_tensor_attr *encoder_in_attr = encoder_ctx.inputs[encoder_x_index].attr;
-    if (!encoder_in_attr)
-    {
-      ret = -1;
-      printf("stage=encoder invalid input attr model=%s input_index=%d name=x\n", encoder_model, encoder_x_index);
-      break;
-    }
-    uint32_t encoder_input_elems = whisper_shape_count(encoder_in_attr);
-    uint32_t copy_elems = (uint32_t)mel_data.size() < encoder_input_elems ? (uint32_t)mel_data.size() : encoder_input_elems;
-
-    memset(encoder_ctx.inputs[encoder_x_index].mem->virt_addr, 0, encoder_ctx.inputs[encoder_x_index].mem->size);
-    ret = whisper_convert_fp32_to_tensor(mel_data.data(), encoder_ctx.inputs[encoder_x_index].mem->virt_addr, copy_elems, encoder_in_attr->dtype);
-    if (ret != 0)
-    {
-      printf("stage=preprocess convert_fp32_to_tensor failed ret=%d model=%s input_index=%d name=%s dtype=%s copy_elems=%u audio_path=%s\n",
-             ret,
-             encoder_model,
-             encoder_x_index,
-             encoder_ctx.inputs[encoder_x_index].attr ? encoder_ctx.inputs[encoder_x_index].attr->name : "<null>",
-             rknn3_get_type_string(encoder_in_attr->dtype),
-             copy_elems,
-             audio_path);
-      break;
-    }
-
-    ret = rknn3_mem_sync(encoder_ctx.rknn_ctx, encoder_ctx.inputs[encoder_x_index].mem, RKNN3_MEMORY_SYNC_TO_DEVICE);
-    if (ret != RKNN3_SUCCESS)
-    {
-      printf("stage=preprocess encoder input sync failed ret=%d model=%s input_index=%d name=%s mem_size=%lu audio_path=%s\n",
-             ret,
-             encoder_model,
-             encoder_x_index,
-             encoder_ctx.inputs[encoder_x_index].attr ? encoder_ctx.inputs[encoder_x_index].attr->name : "<null>",
-             (unsigned long)encoder_ctx.inputs[encoder_x_index].mem->size,
-             audio_path);
-      whisper_print_tensor_shape_brief("  encoder input", encoder_ctx.inputs[encoder_x_index].attr);
-      break;
-    }
-
-    ret = fill_encoder_attention_mask(&encoder_ctx, &audio);
-    if (ret != 0)
-    {
-      printf("stage=preprocess fill_encoder_attention_mask failed ret=%d model=%s audio_path=%s\n", ret, encoder_model, audio_path);
-      break;
-    }
-
-    ret = rknn3_run(encoder_ctx.rknn_ctx, encoder_ctx.inputs, encoder_ctx.io_num.n_input, encoder_ctx.outputs, encoder_ctx.io_num.n_output);
-    if (ret != RKNN3_SUCCESS)
-    {
-      printf("stage=encoder run failed ret=%d model=%s audio_path=%s\n", ret, encoder_model, audio_path);
-      break;
-    }
-    ret = sync_all_outputs_from_device(&encoder_ctx, "encoder");
-    if (ret != 0)
-    {
-      printf("stage=encoder output sync failed ret=%d model=%s audio_path=%s\n", ret, encoder_model, audio_path);
-      break;
-    }
-
-    int decode0_encoder_index = whisper_require_input_index(&decode0_ctx, "decode0", "encoder_outputs", 0);
-    if (decode0_encoder_index < 0)
-    {
-      ret = -1;
-      printf("stage=decode0 missing required input name=encoder_outputs fallback_index=0 ret=%d model=%s weight=%s\n",
-             ret, decode0_model, decode0_weight ? decode0_weight : "NULL");
-      break;
-    }
-    ret = whisper_copy_tensor_data(decode0_ctx.rknn_ctx, &decode0_ctx.inputs[decode0_encoder_index], &encoder_ctx.outputs[0]);
-    if (ret != 0)
-    {
-      printf("stage=decode0 copy encoder output failed ret=%d input_index=%d name=%s src_name=%s model=%s\n",
-             ret,
-             decode0_encoder_index,
-             decode0_ctx.inputs[decode0_encoder_index].attr ? decode0_ctx.inputs[decode0_encoder_index].attr->name : "<null>",
-             encoder_ctx.outputs[0].attr ? encoder_ctx.outputs[0].attr->name : "<null>",
-             decode0_model);
-      break;
-    }
-
-    ret = rknn3_run(decode0_ctx.rknn_ctx, decode0_ctx.inputs, decode0_ctx.io_num.n_input, decode0_ctx.outputs, decode0_ctx.io_num.n_output);
-    if (ret != RKNN3_SUCCESS)
-    {
-      printf("stage=decode0 run failed ret=%d model=%s audio_path=%s\n", ret, decode0_model, audio_path);
-      break;
-    }
-    ret = sync_all_outputs_from_device(&decode0_ctx, "decode0");
-    if (ret != 0)
-    {
-      printf("stage=decode0 output sync failed ret=%d model=%s audio_path=%s\n", ret, decode0_model, audio_path);
-      break;
-    }
-
-    std::vector<int32_t> prompt_tokens = {
-        WHISPER_SOT_TOKEN,
-        strcmp(task, "en") == 0 ? WHISPER_TASK_EN_TOKEN : WHISPER_TASK_ZH_TOKEN,
-        WHISPER_TRANSCRIBE_TOKEN,
-        WHISPER_NO_TIMESTAMPS_TOKEN,
+    const WhisperAudioOptions audio_options = {
+        encoder_model, encoder_weight, decode0_model, decode0_weight, decoder1_model,
+        token_embed_path, task, config, max_audio_length, max_new_tokens, is_turbo
     };
-
-    int next_token = -1;
-    printf("\n---- whisper raw decode ----\n");
-    ret = run_decoder1_raw_prefill_chunks(&decoder1_ctx, &decode0_ctx, &raw_runtime, prompt_tokens.data(), (uint32_t)prompt_tokens.size(), 0, token_embed, hidden_size, &next_token);
-    if (ret != 0)
-    {
-      printf("stage=decoder1 prefill failed ret=%d model=%s audio_path=%s token_embed_path=%s shape_mode=%s n_tokens=%zu start_position=0\n",
-             ret,
-             decoder1_model,
-             audio_path,
-             token_embed_path,
-             decoder1_shape_mode_name(raw_runtime.shape_mode),
-             prompt_tokens.size());
-      break;
-    }
-    stream_state.token_ids.push_back(next_token);
-
-    uint32_t position = (uint32_t)prompt_tokens.size();
-    for (int step = 1; step < max_new_tokens && next_token != WHISPER_EOT_TOKEN; ++step)
-    {
-      int32_t token = next_token;
-      ret = run_decoder1_raw_tokens(&decoder1_ctx, &decode0_ctx, &raw_runtime, &token, 1, position, token_embed, hidden_size, 1, &next_token);
-      if (ret != 0)
-      {
-        printf("stage=decoder1 decode failed ret=%d step=%d model=%s audio_path=%s token_embed_path=%s shape_mode=%s token=%d position=%u n_new_tokens=%d\n",
-               ret,
-               step,
-               decoder1_model,
-               audio_path,
-               token_embed_path,
-               decoder1_shape_mode_name(raw_runtime.shape_mode),
-               token,
-               position,
-               max_new_tokens);
-        break;
-      }
-      stream_state.token_ids.push_back(next_token);
-      ++position;
-    }
-    if (ret != 0)
-    {
-      break;
-    }
-    stream_state.text = decode_whisper_tokens(vocab, stream_state.token_ids, task);
-    infer_timer.tok();
-    infer_time = infer_timer.get_time() / 1000.0f;
-    printf("Whisper output: %s\n", stream_state.text.c_str());
-    if (audio_length > 0.0f)
-    {
-      printf("Inference RTF: %.3f / %.3f = %.3f\n", infer_time, audio_length, infer_time / audio_length);
-    }
-    else
-    {
-      printf("Inference RTF: %.3f / %.3f = n/a\n", infer_time, audio_length);
-    }
+    ret = process_single_audio(audio_path, audio, encoder_ctx, decode0_ctx, decoder1_ctx,
+                               raw_runtime, mel_filters, vocab, token_embed, hidden_size, audio_options);
   } while (0);
 
   if (mel_filters)
@@ -2039,7 +2189,7 @@ int main(int argc, char **argv)
   release_whisper_model(&encoder_ctx);
   release_whisper_model(&decode0_ctx);
   release_whisper_model(&decoder1_ctx);
-  for (int i = 0; i < VOCAB_NUM; ++i)
+  for (int i = 0; i < config.vocab_size; ++i)
   {
     if (vocab[i].token)
     {

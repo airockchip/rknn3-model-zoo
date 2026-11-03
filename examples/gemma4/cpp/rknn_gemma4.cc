@@ -20,6 +20,7 @@
 
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,10 +30,39 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+typedef struct {
+    float16* output;
+    int capacity_tokens;
+    int n_tokens;
+    int embedding_dim;
+} gemma4_audio_stream_accumulator;
+
+static int append_gemma4_audio_stream_embeddings(const float16* embeddings,
+                                                  int n_tokens,
+                                                  void* userdata)
+{
+    gemma4_audio_stream_accumulator* accumulator =
+        (gemma4_audio_stream_accumulator*)userdata;
+    if (accumulator == NULL || embeddings == NULL || n_tokens < 0 ||
+        accumulator->n_tokens + n_tokens > accumulator->capacity_tokens) {
+        if (accumulator != NULL) {
+            printf("audio stream output overflow: %d + %d > %d tokens\n",
+                   accumulator->n_tokens, n_tokens, accumulator->capacity_tokens);
+        }
+        return -1;
+    }
+    memcpy(accumulator->output +
+               (size_t)accumulator->n_tokens * accumulator->embedding_dim,
+           embeddings,
+           (size_t)n_tokens * accumulator->embedding_dim * sizeof(float16));
+    accumulator->n_tokens += n_tokens;
+    return 0;
+}
+
 int init_gemma4_model(rknn_gemma4_app_context* app_ctx,
                       const char* llm_model_path, const char* llm_weight_path,
                       const char* audio_model_path, const char* audio_weight_path,
-                      bool enable_audio, bool enable_vision,
+                      bool enable_audio, bool audio_streaming, bool enable_vision,
                       rknn3_llm_param* params, int n_params,
                       RKLLMCallback& callback, uint32_t llm_core_mask, 
                       uint32_t audio_core_mask, uint32_t vision_core_mask,
@@ -49,13 +79,21 @@ int init_gemma4_model(rknn_gemma4_app_context* app_ctx,
 
     int ret = 0;
     app_ctx->enable_audio = enable_audio;
+    app_ctx->audio_streaming = audio_streaming;
     app_ctx->enable_vision = enable_vision;
 
     if (enable_audio) {
-        printf("--> init gemma4 audio model\n");
-        ret = init_gemma4_audio(&app_ctx->audio, audio_model_path, audio_weight_path, audio_core_mask);
+        printf("--> init gemma4 audio model%s\n", audio_streaming ? " (streaming)" : "");
+        if (audio_streaming) {
+            ret = init_gemma4_audio_stream(&app_ctx->audio_stream, audio_model_path,
+                                           audio_weight_path, audio_core_mask);
+        } else {
+            ret = init_gemma4_audio(&app_ctx->audio, audio_model_path,
+                                    audio_weight_path, audio_core_mask);
+        }
         if (ret < 0) {
-            printf("init_gemma4_audio failed! ret=%d\n", ret);
+            printf("init_gemma4_audio%s failed! ret=%d\n",
+                   audio_streaming ? "_stream" : "", ret);
             return ret;
         }
     }
@@ -66,7 +104,8 @@ int init_gemma4_model(rknn_gemma4_app_context* app_ctx,
         if (ret < 0) {
             printf("init_gemma4_vision failed! ret=%d\n", ret);
             if (enable_audio) {
-                release_gemma4_audio(&app_ctx->audio);
+                if (audio_streaming) release_gemma4_audio_stream(app_ctx->audio_stream);
+                else release_gemma4_audio(&app_ctx->audio);
             }
             return ret;
         }
@@ -77,7 +116,8 @@ int init_gemma4_model(rknn_gemma4_app_context* app_ctx,
     if (ret < 0) {
         printf("init_gemma4_llm failed! ret=%d\n", ret);
         if (enable_audio) {
-            release_gemma4_audio(&app_ctx->audio);
+            if (audio_streaming) release_gemma4_audio_stream(app_ctx->audio_stream);
+            else release_gemma4_audio(&app_ctx->audio);
         }
         if (enable_vision) {
             release_gemma4_vision(&app_ctx->vision);
@@ -93,7 +133,8 @@ int release_gemma4_model(rknn_gemma4_app_context* app_ctx)
 {
     release_gemma4_llm(&app_ctx->llm);
     if (app_ctx->enable_audio) {
-        release_gemma4_audio(&app_ctx->audio);
+        if (app_ctx->audio_streaming) release_gemma4_audio_stream(app_ctx->audio_stream);
+        else release_gemma4_audio(&app_ctx->audio);
     }
     if (app_ctx->enable_vision) {
         release_gemma4_vision(&app_ctx->vision);
@@ -124,10 +165,50 @@ int inference_gemma4_model(rknn_gemma4_app_context* app_ctx,
             return -1;
         }
         tensor.audio.audio_embed = audio_embeds;
-        ret = inference_gemma4_audio(&app_ctx->audio, audio, audio_embeds, &n_valid_audio);
+        if (app_ctx->audio_streaming) {
+            if (!audio || audio->sample_rate != 16000 || audio->num_channels != 1) {
+                printf("streaming audio input must be mono 16 kHz PCM\n");
+                return -1;
+            }
+            if (tensor.audio.n_audio_tokens > INT_MAX) {
+                printf("streaming audio token capacity is too large: %llu\n",
+                       (unsigned long long)tensor.audio.n_audio_tokens);
+                return -1;
+            }
+            gemma4_audio_stream_accumulator accumulator = {
+                audio_embeds,
+                (int)tensor.audio.n_audio_tokens,
+                0,
+                get_gemma4_audio_stream_embedding_dim()
+            };
+
+            ret = reset_gemma4_audio_stream(app_ctx->audio_stream);
+            // Feed 100 ms of PCM at a time. NPU inference consumes the largest
+            // configured Mel bucket, while the final tail uses the smallest
+            // bucket that can contain it.
+            static const int kPcmPushSamples = 1600;
+            for (int offset = 0; ret == 0 && offset < audio->num_frames;
+                 offset += kPcmPushSamples) {
+                int remaining = audio->num_frames - offset;
+                int count = (remaining < kPcmPushSamples) ? remaining : kPcmPushSamples;
+                ret = push_gemma4_audio_stream(app_ctx->audio_stream,
+                                               audio->data + offset, count,
+                                               append_gemma4_audio_stream_embeddings,
+                                               &accumulator);
+            }
+            if (ret == 0) {
+                ret = flush_gemma4_audio_stream(app_ctx->audio_stream,
+                                                append_gemma4_audio_stream_embeddings,
+                                                &accumulator);
+            }
+            n_valid_audio = accumulator.n_tokens;
+        } else {
+            ret = inference_gemma4_audio(&app_ctx->audio, audio, audio_embeds, &n_valid_audio);
+        }
         perf->audio_latency = getCurrentTimeUs() - start_us;
         if (ret != 0) {
-            printf("inference_gemma4_audio failed! ret=%d\n", ret);
+            printf("inference_gemma4_audio%s failed! ret=%d\n",
+                   app_ctx->audio_streaming ? "_stream" : "", ret);
             return ret;
         }
         tensor.audio.n_audio_tokens = n_valid_audio;

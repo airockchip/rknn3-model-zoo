@@ -1,0 +1,57 @@
+From e67f729bdd8cecebfbaee5d5a52c2da73f43a485 Mon Sep 17 00:00:00 2001
+From: "yoris.zhou" <yoris.zhou@rock-chips.com>
+Date: Wed, 10 Jun 2026 15:41:40 +0800
+Subject: [PATCH] ENH:Modify model to optimize performance in rknn
+
+Brief:
+    Modified the model and worked around the 5D transpose
+operator to optimize its performance on RKNN3.
+
+Signed-off-by: yoris.zhou <yoris.zhou@rock-chips.com>
+---
+ core/raft_stereo.py | 24 +++++++++++++++++-------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/core/raft_stereo.py b/core/raft_stereo.py
+index 639d7c7..6144c83 100644
+--- a/core/raft_stereo.py
++++ b/core/raft_stereo.py
+@@ -53,18 +53,28 @@ class RAFTStereo(nn.Module):
+         return coords0, coords1
+ 
+     def upsample_flow(self, flow, mask):
+-        """ Upsample flow field [H/8, W/8, 2] -> [H, W, 2] using convex combination """
++        """ Upsample flow field [H/8, W/8, 2] -> [H, W, 2] using convex combination (RKNN 4D Safe) """
+         N, D, H, W = flow.shape
+         factor = 2 ** self.args.n_downsample
+-        mask = mask.view(N, 1, 9, factor, factor, H, W)
++
++        mask = mask.view(N, 1, 9, factor * factor, H * W)
+         mask = torch.softmax(mask, dim=2)
+ 
+-        up_flow = F.unfold(factor * flow, [3,3], padding=1)
+-        up_flow = up_flow.view(N, D, 9, 1, 1, H, W)
++        up_flow = F.unfold(factor * flow, [3, 3], padding=1)
++        up_flow = up_flow.view(N, D, 9, H * W)
++
++        up_flow_4d = up_flow.view(N, D, 9, 1, H * W)
++        weighted = mask * up_flow_4d
++        up_flow = torch.sum(weighted, dim=2)
++
++        up_flow = up_flow.transpose(2, 3).contiguous()
++
++        up_flow = up_flow.view(N * D, H, W, factor * factor)
++        up_flow = up_flow.permute(0, 3, 1, 2)
++        up_flow = F.pixel_shuffle(up_flow, factor)
++        up_flow = up_flow.view(N, D, factor * H, factor * W)
+ 
+-        up_flow = torch.sum(mask * up_flow, dim=2)
+-        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
+-        return up_flow.reshape(N, D, factor*H, factor*W)
++        return up_flow
+ 
+ 
+     def forward(self, image1, image2, iters=12, flow_init=None, test_mode=False):
+-- 
+2.43.0
+

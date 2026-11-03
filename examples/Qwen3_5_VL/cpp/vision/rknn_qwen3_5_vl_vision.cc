@@ -47,13 +47,85 @@ static void dump_tensor_attr(rknn3_tensor_attr* attrs)
            rknn3_get_type_string(attrs->dtype), attrs->core_id, rknn3_get_qnt_type_string(attrs->qnt_type));
 }
 
+static int setup_context_lora(rknn3_context ctx,
+                              const char* lora_weight_path,
+                              rknn3_lora* lora_out)
+{
+    if (!lora_weight_path || !lora_out) {
+        return -1;
+    }
+
+    int ret = rknn3_lora_init(ctx, lora_weight_path);
+    if (ret < 0) {
+        printf("Failed to initialize Vision LoRA: ret=%d\n", ret);
+        return ret;
+    }
+
+    // RKNN3 has no lora_deinit API. Registration remains owned by ctx and is
+    // released by rknn3_destroy; before lora_load succeeds there is no
+    // descriptor that can be passed to rknn3_lora_unload.
+
+    uint32_t n_lora = 0;
+    ret = rknn3_query(ctx, RKNN3_QUERY_LORA_NUM, &n_lora, sizeof(n_lora));
+    if (ret < 0 || n_lora == 0) {
+        printf("No Vision LoRA found: ret=%d count=%u\n", ret, n_lora);
+        return ret < 0 ? ret : -1;
+    }
+    if (n_lora > RKNN3_MAX_LORA_NUM) {
+        printf("Vision LoRA count exceeds maximum limit: %u > %u\n",
+               n_lora, (unsigned)RKNN3_MAX_LORA_NUM);
+        return -1;
+    }
+
+    rknn3_lora lora_list[RKNN3_MAX_LORA_NUM] = {0};
+    ret = rknn3_query(ctx, RKNN3_QUERY_LORA_INFO, lora_list, sizeof(lora_list));
+    if (ret < 0) {
+        printf("Failed to query Vision LoRA info: ret=%d\n", ret);
+        return ret;
+    }
+    ret = rknn3_lora_load(ctx, &lora_list[0]);
+    if (ret < 0) {
+        printf("Failed to load Vision LoRA: ret=%d\n", ret);
+        return ret;
+    }
+    *lora_out = lora_list[0];
+    printf("Vision LoRA loaded: name=%s scale=%.3f\n", lora_out->lora_name, lora_out->scale);
+    return 0;
+}
+
+static int set_vision_lora_enabled(rknn_qwen3_5_vl_vision_context* vision_ctx,
+                                   bool enable)
+{
+    if (!vision_ctx || !vision_ctx->lora_loaded ||
+        vision_ctx->lora_enabled == enable) {
+        return 0;
+    }
+    int ret = enable ? rknn3_lora_enable(vision_ctx->rknn_ctx, &vision_ctx->lora)
+                     : rknn3_lora_disable(vision_ctx->rknn_ctx, &vision_ctx->lora);
+    if (ret < 0) {
+        printf("Failed to %s Vision LoRA: ret=%d\n",
+               enable ? "enable" : "disable", ret);
+        return ret;
+    }
+    vision_ctx->lora_enabled = enable;
+    printf("Vision LoRA %s\n", enable ? "enabled" : "disabled");
+    return 0;
+}
+
 
 int init_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, uint32_t model_width, uint32_t model_height)
 {
+    if (!vision_ctx) {
+        printf("init_qwen3_5_vl_vision: vision_ctx is NULL\n");
+        return -1;
+    }
     int ret;
     rknn3_context ctx = 0;
     rknn3_config config;
     memset(&config, 0, sizeof(config));
+    memset(vision_ctx, 0, sizeof(*vision_ctx));
+    vision_ctx->lora_loaded = false;
+    vision_ctx->lora_enabled = false;
     config.run_core_mask = core_mask;
     config.user_mem_internal = 1; // 使用用户管理的internal内存
 
@@ -194,8 +266,36 @@ int init_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, const cha
     return ret;
 }
 
+int setup_qwen3_5_vl_vision_lora(rknn_qwen3_5_vl_vision_context* vision_ctx,
+                                const char* lora_weight_path)
+{
+    if (!vision_ctx || !lora_weight_path) {
+        return 0;
+    }
+    rknn3_lora lora = {0};
+    int ret = setup_context_lora(vision_ctx->rknn_ctx, lora_weight_path, &lora);
+    if (ret < 0) {
+        return ret;
+    }
+    vision_ctx->lora = lora;
+    vision_ctx->lora_loaded = true;
+    vision_ctx->lora_enabled = false;
+    return 0;
+}
+
 int release_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx)
 {
+    if (!vision_ctx) {
+        return -1;
+    }
+    if (vision_ctx->lora_loaded) {
+        if (vision_ctx->lora_enabled) {
+            rknn3_lora_disable(vision_ctx->rknn_ctx, &vision_ctx->lora);
+            vision_ctx->lora_enabled = false;
+        }
+        rknn3_lora_unload(vision_ctx->rknn_ctx, &vision_ctx->lora);
+        vision_ctx->lora_loaded = false;
+    }
     for (int i = 0; i < vision_ctx->io_num.n_input; i++) {
         if (vision_ctx->inputs[i].mem) {
             rknn3_destroy_mem(vision_ctx->rknn_ctx, vision_ctx->inputs[i].mem);
@@ -214,6 +314,10 @@ int release_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx)
             vision_ctx->outputs[i].attr = NULL;
         }
     }
+    free(vision_ctx->inputs);
+    vision_ctx->inputs = NULL;
+    free(vision_ctx->outputs);
+    vision_ctx->outputs = NULL;
     if (vision_ctx->rknn_ctx != 0)
     {
         rknn3_destroy(vision_ctx->rknn_ctx);
@@ -305,7 +409,7 @@ bool save_as_bin(const char* filename, void* data, size_t size) {
     return true;
 }
 
-int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds)
+int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, bool use_lora)
 {
     if ((!vision_ctx) || (!img))
     {
@@ -338,6 +442,11 @@ int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, imag
         goto out;
     }
 
+    ret = set_vision_lora_enabled(vision_ctx, use_lora);
+    if (ret < 0) {
+        goto out;
+    }
+
     if(vision_ctx->pruned_version_flag == 1) {
         expand_data = (float16*)malloc(dst_img.size * 2 * sizeof(float16)); //expand
         normalize_and_to_nchw(dst_img.virt_addr, expand_data, vision_ctx->model_width, vision_ctx->model_height);
@@ -345,8 +454,22 @@ int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, imag
         transpose((float16 *)expand_data, (float16 *)(vision_ctx->inputs[0].mem->virt_addr), vision_ctx->model_width, vision_ctx->model_height);
         free(expand_data);
     } else {
-        // Set Input Data
-        memcpy(vision_ctx->inputs[0].mem->virt_addr, (uint8_t*)dst_img.virt_addr, dst_img.size);
+        // The Qwen3.5 full graph is exported as NCHW float16. Convert the
+        // RGB888 image to the same [-1, 1] representation used by the
+        // original PyTorch export before copying it to RKNN memory.
+        size_t pixel_count = (size_t)vision_ctx->model_width *
+                             (size_t)vision_ctx->model_height * 3;
+        float16* nchw_data = (float16*)malloc(pixel_count * sizeof(float16));
+        if (!nchw_data) {
+            printf("malloc normalized vision input failed\n");
+            ret = -1;
+            goto out;
+        }
+        normalize_and_to_nchw(dst_img.virt_addr, nchw_data,
+                              vision_ctx->model_width, vision_ctx->model_height);
+        memcpy(vision_ctx->inputs[0].mem->virt_addr, nchw_data,
+               pixel_count * sizeof(float16));
+        free(nchw_data);
     }
 
     // Sync Inputs

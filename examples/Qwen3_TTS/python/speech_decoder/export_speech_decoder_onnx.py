@@ -124,9 +124,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--attn_implementation",
         type=str,
-        help="attention implementation passed into the model loader",
+        choices=["eager"],
+        help="ONNX export requires eager attention",
         required=False,
-        default="sdpa",
+        default="eager",
     )
 
     args = parser.parse_args()

@@ -19,7 +19,7 @@ onnxruntime                       1.22.1
 
 ## 2. 支持的模型
 
-目前支持 Qwen3.5-VL 系列多模态模型，以 **Qwen3.5-0.8B** 为例：
+目前支持 Qwen3.5-VL 系列多模态模型，以 **Qwen3.5-4B** 为例：
 
 ### 2.1 导出 Vision ONNX 模型
 
@@ -28,12 +28,12 @@ onnxruntime                       1.22.1
 cd examples/Qwen3_5_VL/python/vision
 
 # 生成 vision 模型量化校准数据
-python make_calidata.py --model_path Qwen/Qwen3.5-0.8B
+python make_calidata.py --model_path Qwen/Qwen3.5-4B
 
 # 导出 Vision ONNX 模型
 python export_vision.py --quant \
-    --model_path Qwen/Qwen3.5-0.8B \
-    --export_vision_path ../../model/vision/Qwen3.5-0.8B-vision.onnx \
+    --model_path Qwen/Qwen3.5-4B \
+    --export_vision_path ../../model/vision/Qwen3.5-4B-vision.onnx \
     --img_h 384 \
     --img_w 384
 ```
@@ -55,12 +55,17 @@ python export_vision.py --quant \
 
 ```bash
 python export_rknn.py \
-    --onnx_path ../../model/vision/Qwen3.5-0.8B-vision.onnx \
-    --rknn_path ../../model/vision/Qwen3.5-0.8B-vision.rknn \
+    --no_prune_mode \
+    --onnx_path ../../model/vision/Qwen3.5-4B-vision.onnx \
+    --rknn_path ../../model/vision/Qwen3.5-4B-vision.rknn \
     --platform rk1820
 ```
 
-Vision RKNN 转换支持两种模式：
+Vision RKNN 转换支持两种模式。`export_vision.py` 导出的 Qwen3.5 Vision ONNX 是完整的
+`pixel` 图，使用完整模式时请增加 `--no_prune_mode`；本 demo 的完整模式输入为 NCHW float16，
+C++ 会在送入 RKNN 前完成 RGB888 到 `[-1, 1]` 的归一化和 NCHW 排布。
+
+转换脚本也保留两种模式：
 
 | 模式 | 说明 |
 |------|------|
@@ -73,12 +78,12 @@ Vision RKNN 转换支持两种模式：
 cd examples/Qwen3_5_VL/python/llm
 
 # 生成 LLM 模型量化校准数据
-python make_calidata.py --model_path Qwen/Qwen3.5-0.8B
+python make_calidata.py --model_path Qwen/Qwen3.5-4B
 
 # 导出 LLM ONNX 模型
 python export_llm.py --quant \
-    --model_path Qwen/Qwen3.5-0.8B \
-    --export_llm_path ../../model/llm/Qwen3.5-0.8B.onnx
+    --model_path Qwen/Qwen3.5-4B \
+    --export_llm_path ../../model/llm/Qwen3.5-4B.onnx
 ```
 
 `make_calidata.py` 参数说明：
@@ -93,10 +98,10 @@ python export_llm.py --quant \
 
 执行后会在指定目录下同步生成：
 ```bash
-Qwen3.5-0.8B.onnx
-Qwen3.5-0.8B.config.pkl
-Qwen3.5-0.8B.tokenizer.gguf
-Qwen3.5-0.8B.embed.bin
+Qwen3.5-4B.onnx
+Qwen3.5-4B.config.pkl
+Qwen3.5-4B.tokenizer.gguf
+Qwen3.5-4B.embed.bin
 ```
 
 ### 2.4 导出 LLM RKNN 模型
@@ -104,16 +109,16 @@ Qwen3.5-0.8B.embed.bin
 ```bash
 # 导出 LLM RKNN 模型
 python export_rknn.py \
-    --onnx_path ../../model/llm/Qwen3.5-0.8B.onnx \
-    --config ../../model/llm/Qwen3.5-0.8B.config.pkl \
-    --rknn_path ../../model/llm/Qwen3.5-0.8B.rknn \
+    --onnx_path ../../model/llm/Qwen3.5-4B.onnx \
+    --config ../../model/llm/Qwen3.5-4B.config.pkl \
+    --rknn_path ../../model/llm/Qwen3.5-4B.rknn \
     --platform rk1820
 
 # 如需重新导出（仅修改 profile_mode 或 kvcache 相关参数），可使用 --rebuild 跳过 ONNX 加载和图优化等步骤，加速模型导出：
 python export_rknn.py \
-    --onnx_path ../../model/llm/Qwen3.5-0.8B.onnx \
-    --config ../../model/llm/Qwen3.5-0.8B.config.pkl \
-    --rknn_path ../../model/llm/Qwen3.5-0.8B.rknn \
+    --onnx_path ../../model/llm/Qwen3.5-4B.onnx \
+    --config ../../model/llm/Qwen3.5-4B.config.pkl \
+    --rknn_path ../../model/llm/Qwen3.5-4B.rknn \
     --platform rk1820 \
     --rebuild
 ```
@@ -169,9 +174,155 @@ llm_config['attention_config'][0]['kvcache_dtype'] = 'Int4_to_F16'
 > - `Int4_to_F16` 适用于更长上下文场景，但可能带来一定精度损失。
 > - 修改 KV Cache 配置后，需要重新执行 RKNN 转换。
 
-## 5. C++ 部署说明
+## 5. LoRA 转换与推理
 
-### 5.1 编译
+Qwen3.5-VL 的 LoRA 支持默认关闭。只传入基础模型参数时，`export_rknn.py` 只导出
+Base RKNN；只有同时指定 `--lora_path` 和 `--lora_config_path` 时，才会调用
+`rknn.load_lora()` 并生成 LoRA 权重文件。LLM 和 Vision LoRA 可以分别启用，也可以同时启用。
+
+### 5.1 导出 ONNX 与 HF/ONNX 映射
+
+`export_llm.py` 和 `export_vision.py` 会把 HuggingFace 权重名与 ONNX initializer 的消费者算子
+写入 `*.hf_onnx_map.json`。LoRA 转换必须使用同一份 Base HF 模型、同一份 ONNX 和同一版本的
+adapter；不要把不同版本的映射文件混用。
+
+下面的路径均为示例，请替换为实际路径：
+
+```bash
+BASE_HF=/path/to/Qwen3.5-4B
+LLM_LORA=/path/to/llm_lora/adapter_model.safetensors
+LLM_LORA_CONFIG=/path/to/llm_lora/adapter_config.json
+VISION_LORA=/path/to/vision_lora/adapter_model.safetensors
+VISION_LORA_CONFIG=/path/to/vision_lora/adapter_config.json
+OUT_DIR=/path/to/Qwen3_5_VL/model
+REPO=/path/to/rknn3-model-zoo
+
+cd "$REPO/examples/Qwen3_5_VL/python/llm"
+python export_llm.py --quant \
+    --model_path "$BASE_HF" \
+    --export_llm_path "$OUT_DIR/llm/Qwen3.5-4B.onnx" \
+    --hf_onnx_map "$OUT_DIR/llm/Qwen3.5-4B.hf_onnx_map.json"
+
+cd "$REPO/examples/Qwen3_5_VL/python/vision"
+python export_vision.py --quant \
+    --model_path "$BASE_HF" \
+    --export_vision_path "$OUT_DIR/vision/Qwen3.5-4B-vision.onnx" \
+    --img_h 384 --img_w 384 \
+    --hf_onnx_map "$OUT_DIR/vision/Qwen3.5-4B-vision.hf_onnx_map.json"
+```
+
+### 5.2 LoRA RKNN 转换
+
+LoRA 的默认量化和分布策略为：`int4`、`group32`、`less_mem`。以下命令会生成 LoRA RKNN
+以及与之配套的 `.lora_weight` 文件：
+
+```bash
+cd "$REPO/examples/Qwen3_5_VL/python/llm"
+python export_rknn.py \
+    --onnx_path "$OUT_DIR/llm/Qwen3.5-4B.onnx" \
+    --config "$OUT_DIR/llm/Qwen3.5-4B.config.pkl" \
+    --rknn_path "$OUT_DIR/llm/Qwen3.5-4B-lora.rknn" \
+    --platform rk1828 \
+    --lora_path "$LLM_LORA" \
+    --lora_config_path "$LLM_LORA_CONFIG" \
+    --hf_onnx_map "$OUT_DIR/llm/Qwen3.5-4B.hf_onnx_map.json" \
+    --lora_node_map_output "$OUT_DIR/llm/Qwen3.5-4B-lora.lora_node_map.json" \
+    --lora_node_map_report "$OUT_DIR/llm/Qwen3.5-4B-lora.lora_node_map.report.json"
+
+cd "$REPO/examples/Qwen3_5_VL/python/vision"
+python export_rknn.py \
+    --no_prune_mode \
+    --onnx_path "$OUT_DIR/vision/Qwen3.5-4B-vision.onnx" \
+    --rknn_path "$OUT_DIR/vision/Qwen3.5-4B-vision-lora.rknn" \
+    --platform rk1828 \
+    --lora_path "$VISION_LORA" \
+    --lora_config_path "$VISION_LORA_CONFIG" \
+    --hf_onnx_map "$OUT_DIR/vision/Qwen3.5-4B-vision.hf_onnx_map.json" \
+    --lora_node_map_output "$OUT_DIR/vision/Qwen3.5-4B-vision-lora.lora_node_map.json" \
+    --lora_node_map_report "$OUT_DIR/vision/Qwen3.5-4B-vision-lora.lora_node_map.report.json"
+```
+
+常用输出文件如下：
+
+```text
+<stem>.hf_onnx_map.json             # HF 权重 -> ONNX initializer/consumer op
+<stem>-lora.lora_node_map.json      # ONNX 节点 -> LoRA A/B 权重
+<stem>-lora.lora_node_map.report.json
+<stem>-lora.rknn
+<stem>-lora_lora0_pattern0.lora_weight # C++ 运行时加载的 LoRA 权重
+<stem>-lora.llm.safetensors          # LLM 过滤后的 adapter，可选
+<stem>-lora.vision.safetensors       # Vision 过滤后的 adapter，可选
+```
+
+`--rebuild` 只能复用上一次完整构建的中间状态，不能与新的 `--lora_path` 或
+`--lora_config_path` 一起使用。修改 adapter、Base HF 模型或节点映射后，应重新执行完整转换。
+
+### 5.3 节点匹配算法与校验边界
+
+`python/lora_node_map.py` 首先按 initializer 形状匹配（同时考虑二维权重转置），然后使用前
+`1024` 个元素的绝对值和做 fingerprint 预筛选，最后用分块 L1 距离贪心选择未使用的 initializer，
+并记录其消费者算子名和 `op_type`。这是数值相似度匹配，不是唯一标识或密码学证明：相同形状且
+数值相同/近似的共享权重仍可能产生歧义，MD5/SHA256 也无法区分“内容相同但图语义不同”的
+initializer。
+
+转换后请检查 `*.lora_node_map.report.json` 和映射 JSON 的 `stats`：目标分支应关注
+`unmatched`、`approx_matches`、每个条目的 `l1` 和 `transpose`。如果匹配数量异常，优先确认
+Base HF、LoRA adapter、ONNX 来自同一模型 revision，并进行 Base/LoRA 输出回归验证；不要先手工
+改名绕过映射。Vision adapter 同时包含语言和视觉权重时，脚本会过滤不属于当前 ONNX 的权重并
+保留过滤后的 safetensors，未映射数量不一定表示转换失败。
+
+### 5.4 C++ LoRA 推理
+
+基础参数的 10 参数调用保持不变。原有位置参数方式仍然支持：启用 LoRA 时，在
+`model_width model_height speedup_ratio` 之后追加 `[llm_lora_weight_path]
+[vision_lora_weight_path]`，不启用的一侧使用 `-` 占位：
+
+```bash
+./rknn_qwen3_5_vl_demo \
+    /path/to/model/Qwen3.5-4B-vision-lora.rknn \
+    /path/to/model/Qwen3.5-4B-vision-lora.weight \
+    /path/to/model/Qwen3.5-4B-lora.rknn \
+    /path/to/model/Qwen3.5-4B-lora.weight \
+    /path/to/model/Qwen3.5-4B.tokenizer.gguf \
+    /path/to/model/Qwen3.5-4B.embed.bin \
+    0xff 0xff /path/to/image.jpg "描述这张图片" \
+    384 384 0.0 \
+    /path/to/model/Qwen3.5-4B-lora_lora0_pattern0.lora_weight \
+    /path/to/model/Qwen3.5-4B-vision-lora_lora0_pattern0.lora_weight
+```
+
+也可以使用独立的命名参数，不需要为 LoRA 路径补齐宽高和 SpeedUP 占位参数；两侧可以分别配置：
+
+```bash
+./rknn_qwen3_5_vl_demo \
+    /path/to/model/Qwen3.5-4B-vision-lora.rknn \
+    /path/to/model/Qwen3.5-4B-vision-lora.weight \
+    /path/to/model/Qwen3.5-4B-lora.rknn \
+    /path/to/model/Qwen3.5-4B-lora.weight \
+    /path/to/model/Qwen3.5-4B.tokenizer.gguf \
+    /path/to/model/Qwen3.5-4B.embed.bin \
+    0xff 0xff /path/to/image.jpg "描述这张图片" \
+    --llm_lora_path /path/to/model/Qwen3.5-4B-lora_lora0_pattern0.lora_weight \
+    --vision_lora_path /path/to/model/Qwen3.5-4B-vision-lora_lora0_pattern0.lora_weight
+```
+
+程序会先执行 Base Vision + Base LLM；若提供 Vision adapter，再执行一次 Vision LoRA。
+若提供 LLM adapter，Base LLM session 会在 Base 推理结束后释放，再创建 LoRA LLM session；
+这避免同一 context 中双 session 造成内存挤占，但会产生一次 session 初始化开销。该流程适合
+单次 Base/LoRA 对比验证。若业务需要高频交替推理，应在 SDK 支持和内存验证完成后，探索复用
+同一 context 并使用 `rknn3_lora_enable` / `rknn3_lora_disable` 的上下文级切换；当前 C++ demo
+对 LLM 采用 Base→LoRA 的一次性生命周期。
+
+Vision LoRA 在同一 Vision context 上启用/禁用，不需要重建 Vision session。只配置 Vision LoRA
+时，LLM 仍使用 Base session；只配置 LLM LoRA 时，Vision 使用 Base 输出。LoRA 权重必须与
+同一次 `export_rknn.py` LoRA 转换生成的 `*-lora.rknn` / `*-lora.weight` 配套；运行时启用
+LoRA 时，模型参数也应使用这组 LoRA 导出的 `.rknn` / `.weight`，再传入对应的
+`*.lora_weight`。LoRA 导出的模型在尚未 enable adapter 时仍执行 Base 权重，因此上面的命令
+可以完成 Base→LoRA 对比。只运行 Base 时，才使用不带 `-lora` 后缀的 `.rknn` / `.weight`。
+
+## 6. C++ 部署说明
+
+### 6.1 编译
 
 ```bash
 cd rknn3_model_zoo/
@@ -183,23 +334,27 @@ export GCC_COMPILER=/path/to/aarch64-linux-gnu
 ./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_5_VL
 ```
 
+默认编译普通推理版本。如需启用 SpeedUP，在上述命令末尾添加 `--enable_speedup`，并准备好 SpeedUP 头文件及对应平台的库。
+
 编译完成后，文件生成在 `install/rk3588_linux_aarch64/rknn_Qwen3_5_VL_demo/` 目录。
 
-### 5.2 所需文件
+### 6.2 所需文件
 
 ```bash
-<vision_model_path>   ../model/vision/Qwen3.5-0.8B-vision.rknn
-<vision_weight_path>  ../model/vision/Qwen3.5-0.8B-vision.weight
-<llm_model_path>      ../model/llm/Qwen3.5-0.8B.rknn
-<llm_weight_path>     ../model/llm/Qwen3.5-0.8B.weight
-<tokenizer_path>      ../model/llm/Qwen3.5-0.8B.tokenizer.gguf
-<embedding_path>      ../model/llm/Qwen3.5-0.8B.embed.bin
+<vision_model_path>   ../model/vision/Qwen3.5-4B-vision.rknn
+<vision_weight_path>  ../model/vision/Qwen3.5-4B-vision.weight
+<llm_model_path>      ../model/llm/Qwen3.5-4B.rknn
+<llm_weight_path>     ../model/llm/Qwen3.5-4B.weight
+<tokenizer_path>      ../model/llm/Qwen3.5-4B.tokenizer.gguf
+<embedding_path>      ../model/llm/Qwen3.5-4B.embed.bin
 ```
 
 其中 `tokenizer.gguf` 和 `embed.bin` 由 `export_llm.py` 自动导出，部署时需与 RKNN 模型
 保持同一模型版本。`weight_path` 为 RKNN 运行时使用的权重文件。
 
-### 5.3 命令行参数
+### 6.3 命令行参数
+
+C++ demo 保持原有命令行参数兼容；如需启用 SpeedUP，可在命令末尾增加可选参数 `speedup_ratio`：
 
 ```bash
 ./rknn_qwen3_5_vl_demo \
@@ -208,8 +363,27 @@ export GCC_COMPILER=/path/to/aarch64-linux-gnu
     <tokenizer_path> <embedding_path> \
     <vision_core_mask> <llm_core_mask> \
     <image_path> <prompt> \
-    [model_width] [model_height]
+    [model_width model_height] [speedup_ratio]
 ```
+
+LoRA 路径支持独立的命名参数，可单独启用任意一侧，不要求填写前面的可选位置参数：
+
+```text
+--llm_lora_path <path>
+--vision_lora_path <path>
+--model_width <width> --model_height <height>
+--speedup_ratio <0..1>
+```
+
+命名参数也支持短横线形式（如 `--llm-lora-path`），但不能和旧的位置参数混用。
+
+`speedup_ratio` 取值说明：
+
+- `1.0`：单图自动模式，默认值；多图不支持 Auto。
+- `0.0`：关闭 SpeedUP。
+- `(0.0, 1.0)`：手动模式。
+
+指定 `speedup_ratio` 时需先填写模型宽高，例如在 prompt 后追加 `384 384 0.5`。
 
 参数说明：
 
@@ -228,18 +402,18 @@ export GCC_COMPILER=/path/to/aarch64-linux-gnu
 | `model_width` | （可选）Vision 模型输入宽度，Prune 模式下需手动指定 |
 | `model_height` | （可选）Vision 模型输入高度，Prune 模式下需手动指定 |
 
-### 5.4 运行示例
+### 6.4 运行示例
 
-以 **Qwen3.5-0.8B** 为例：
+以 **Qwen3.5-4B** 为例：
 
 ```bash
 ./rknn_qwen3_5_vl_demo \
-    model/Qwen3.5-0.8B-vision.rknn \
-    model/Qwen3.5-0.8B-vision.weight \
-    model/Qwen3.5-0.8B.rknn \
-    model/Qwen3.5-0.8B.weight \
-    model/Qwen3.5-0.8B.tokenizer.gguf \
-    model/Qwen3.5-0.8B.embed.bin \
+    model/Qwen3.5-4B-vision.rknn \
+    model/Qwen3.5-4B-vision.weight \
+    model/Qwen3.5-4B.rknn \
+    model/Qwen3.5-4B.weight \
+    model/Qwen3.5-4B.tokenizer.gguf \
+    model/Qwen3.5-4B.embed.bin \
     0xff 0xff \
     model/demo.jpg \
     "描述这张图片的内容"
@@ -256,7 +430,7 @@ export GCC_COMPILER=/path/to/aarch64-linux-gnu
 > - Prune 模式下，若未通过命令行指定 `model_width` / `model_height`，将使用代码中默认的
 >   `MODEL_WIDTH=384` / `MODEL_HEIGHT=384`。请确保该值与导出 Vision ONNX 时的 `--img_h` / `--img_w` 一致。
 
-### 5.4 架构说明
+### 6.5 架构说明
 
 Qwen3.5-VL 的 C++ demo 采用 Vision + LLM 双模型架构：
 
@@ -273,4 +447,3 @@ Qwen3.5-VL 的 C++ demo 采用 Vision + LLM 双模型架构：
 
 Prompt 中会自动添加 `<image>` 前缀标记，以及 `<|vision_start|>` / `<|vision_end|>` /
 `<|image_pad|>` 等视觉特殊 token。
-

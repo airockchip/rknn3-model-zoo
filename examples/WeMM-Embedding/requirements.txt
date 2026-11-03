@@ -1,0 +1,10 @@
+accelerate>=1.1.0
+huggingface_hub
+modelscope
+onnx>=1.18.0
+pillow
+pyarrow
+qwen-vl-utils[decord]==0.0.14
+safetensors
+torch==2.7.0
+transformers==5.2.0

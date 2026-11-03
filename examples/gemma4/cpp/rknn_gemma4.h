@@ -24,6 +24,7 @@
 #include "rknn3_api.h"
 #include "rknn_gemma4_llm.h"
 #include "rknn_gemma4_audio.h"
+#include "rknn_gemma4_audio_stream.h"
 #include "rknn_gemma4_vision.h"
 #include "Tokenizer.h"
 #include "time_utils.h"
@@ -64,8 +65,10 @@ typedef struct {
 typedef struct {
     rknn_gemma4_llm_context llm;
     rknn_gemma4_audio_context audio;
+    rknn_gemma4_audio_stream_context* audio_stream;
     rknn_gemma4_vision_context vision;
     bool enable_audio;
+    bool audio_streaming;
     bool enable_vision;
     int n_internal_mems;
     rknn3_tensor_mem** internal_mems;
@@ -74,7 +77,7 @@ typedef struct {
 int init_gemma4_model(rknn_gemma4_app_context* app_ctx,
                       const char* llm_model_path, const char* llm_weight_path,
                       const char* audio_model_path, const char* audio_weight_path,
-                      bool enable_audio, bool enable_vision,
+                      bool enable_audio, bool audio_streaming, bool enable_vision,
                       rknn3_llm_param* params, int n_params,
                       RKLLMCallback& callback, uint32_t llm_core_mask,
                       uint32_t audio_core_mask, uint32_t vision_core_mask,

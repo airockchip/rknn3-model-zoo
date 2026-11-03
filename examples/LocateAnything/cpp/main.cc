@@ -55,8 +55,8 @@ const rknn3_sampling_params SAMPLE_PARAMS = {
     .presence_penalty = 0.0f,
 };
 
-const char* system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n";
-const char* prompt_prefix = "<|im_start|>user\n";
+const char* system_prompt = "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>";
+const char* prompt_prefix = "<|im_start|>user\n<image 1>";
 const char* prompt_postfix = "<|im_end|>\n<|im_start|>assistant\n";
 
 static std::string locate_anything_token_to_piece(Tokenizer* tokenizer, int32_t token)
@@ -494,7 +494,7 @@ int main(int argc, char** argv)
     vis_height = src_image.height;
 
     tensor.name = "input_embeds";
-    prompt_with_image = "<image> " + std::string(prompt);
+    prompt_with_image = "<image>" + std::string(prompt);
     tensor.prompt = prompt_with_image.c_str();
     tensor.image.image_embed = img_embeds;
     if (app_ctx.vision.embeds_ndims == 2) {

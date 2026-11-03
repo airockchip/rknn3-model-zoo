@@ -1,0 +1,14 @@
+!model/
+model/*
+!model/customer_service.json
+!model/review_analysis.json
+__pycache__/
+*.pyc
+model/*.bin
+model/*.onnx
+model/*.rknn
+model/*.weight
+model/tokenizer.json
+model/laya.json
+outputs/
+tmp/

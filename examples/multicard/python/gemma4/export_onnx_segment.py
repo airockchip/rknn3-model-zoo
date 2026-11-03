@@ -4,8 +4,10 @@ import torch
 from collections import UserDict
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from segment_planner import prepare_plan
 from py_utils.export_llm_helper import (
-    _balanced_segment_layer_counts, _estimate_module_weight_size,
+    _estimate_module_weight_size, _resolve_segment_layer_counts,
     check_gptq, register_bitwise_right_shift,
 )
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
@@ -221,13 +223,24 @@ def causal_gemma4_unified_to_onnx_multi_segment(model, args):
             lm_head_weight_bits,
         )
     )
-    segment_layer_counts = _balanced_segment_layer_counts(
+    prepare_plan(
+        "gemma4", text_config, layer_weight_sizes,
+        last_segment_extra_size, args,
+    )
+    segment_layer_counts = _resolve_segment_layer_counts(
         layer_weight_sizes,
         num_segments,
         last_segment_extra_size,
+        getattr(args, 'segment_layer_counts', None),
     )
     num_segments = len(segment_layer_counts)
 
+    stop_after_segment = getattr(args, 'stop_after_segment', None)
+    if stop_after_segment is not None and not 0 <= stop_after_segment < num_segments:
+        raise ValueError(
+            "--stop_after_segment must be within the exported segment range: "
+            f"0 <= {stop_after_segment} < {num_segments}"
+        )
     segment_weight_sizes = []
     layer_start = 0
     for segment_index, layer_count in enumerate(segment_layer_counts):
@@ -388,5 +401,17 @@ def causal_gemma4_unified_to_onnx_multi_segment(model, args):
 
         print(f"  Segment {seg_idx} exported to {os.path.abspath(seg_path)}")
         layer_start = layer_end
+        if stop_after_segment is not None and seg_idx >= stop_after_segment:
+            print(
+                f"Stopping after segment {seg_idx} as requested by "
+                "--stop_after_segment"
+            )
+            break
 
-    print(f"All {num_segments} segments exported successfully.")
+    exported_segments = seg_idx + 1
+    if stop_after_segment is None:
+        print(f"All {num_segments} segments exported successfully.")
+    else:
+        print(
+            f"Exported requested prefix: {exported_segments}/{num_segments} segments."
+        )

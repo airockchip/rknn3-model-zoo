@@ -126,7 +126,7 @@ int clear_lfm2_cache(rknn_lfm2_llm_context *ctx)
         printf("[ERROR] clear_lfm2_cache: ctx not initialized\n");
         return -1;
     }
-    int ret = rknn3_session_clear_kvcache(ctx->rknn_sess, RKNN3_KVCACHE_CLEAR_ALL);
+    int ret = rknn3_session_clear_kvcache(ctx->rknn_sess, RKNN3_KVCACHE_CLEAR_ALL, nullptr);
     if (ret != 0) {
         printf("[ERROR] rknn3_session_clear_kvcache fail ret=%d (stage: clear_kvcache)\n", ret);
     }

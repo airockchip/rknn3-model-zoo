@@ -33,12 +33,22 @@ typedef struct {
     rknn3_session*  rknn_sess_lora;
     rknn3_lora      lora;
     bool            lora_enabled;
-    rknn3_aux_tensor deepstack_tensor[3];
+    rknn3_aux_tensor deepstack_tensor[3];      // 对应 base vision 输出
+    rknn3_aux_tensor deepstack_tensor_lora[3]; // 对应带 LoRA 的 vision 输出
+    bool            lora_deepstack_ready;      // lora vision 输出是否已写入
+
+    rknn3_llm_param params_lora;        // lora session 参数（按需创建时使用）
+    RKLLMCallback*  callback;           // 指向 main 中的 callback
 } rknn_qwen3_vl_llm_context;
 
 int init_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx, const char* model_path, const char* weight_path, rknn3_llm_param* params, int n_params, RKLLMCallback& callback, uint32_t core_mask, int max_context_len1, int max_context_len2, int* deepstack_aligned_size, char* lora_weight_path);
 
 int release_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx);
+
+// 同一 context 上同时存在两个 session 会挤占运行期传输缓冲，导致 session run 分配失败。
+// 因此 LoRA session 在 base 段推理结束后才创建，并且创建前先销毁 base session。
+int destroy_qwen3_vl_llm_base_session(rknn_qwen3_vl_llm_context* llm_ctx);
+int create_qwen3_vl_llm_lora_session(rknn_qwen3_vl_llm_context* llm_ctx, const char* lora_weight_path);
 
 int inference_qwen3_vl_llm_base(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t* perf);
 int inference_qwen3_vl_llm_lora(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t* perf);

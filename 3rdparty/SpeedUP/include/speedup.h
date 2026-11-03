@@ -16,7 +16,7 @@
 #define SPEEDUP_H
 
 #include <stdint.h>
-#include <rknn3_api.h>
+#include "rknn3_api.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,10 +29,10 @@ extern "C" {
 typedef struct SpeedUPContext* SpeedUPHandle;
 
 typedef struct {
-    float tau;       // Automatic mode threshold.
-    float min_ratio; // Lower bound of the output ratio.
-    float max_ratio; // Upper bound of the output ratio.
-    int stride;      // Feature stride.
+    float tau;       // Threshold for single-image Auto mode.
+    float min_ratio; // Lower parameter limit for single-image Auto mode.
+    float max_ratio; // Upper parameter limit for single-image Auto mode.
+    int stride;      // Runtime stride. The validated/default value is 16.
 } SpeedUPConfig;
 
 typedef struct {
@@ -48,14 +48,13 @@ typedef struct {
     int embedding_dim;          // Embedding dimension for each item.
     int32_t model_width;        // Model input width, used for runtime shape setup.
     int32_t model_height;       // Model input height, used for runtime shape setup.
-    float speedup_ratio;  // 0 disables acceleration, (0, 1) uses manual ratio, 1 enables automatic ratio.
+    float speedup_ratio;       // Mode parameter: 0 disables SpeedUP; (0, 1) selects Manual; 1 is single-image Auto.
     rknn3_session* llm_sess;    // LLM session handle. Reserved for interfaces that need session context.
 } SpeedUPMultimodalParam;
 
 /**
  * @brief Creates a SpeedUP instance.
  *
- * The returned handle stores per-request runtime state and callback state.
  * Each inference thread should use an independent handle.
  *
  * @param[in] config Pointer to SpeedUP configuration. If NULL, default configuration is used.
@@ -70,20 +69,18 @@ SpeedUPHandle speedup_create(const SpeedUPConfig* config);
  *
  * @param[in] handle SpeedUP handle created by speedup_create().
  *
- * @note This function releases only resources owned by SpeedUP. If an MRoPE callback
+ * @note This function releases only resources owned by SpeedUP. If a session callback
  *       was attached to an RKNN3 session, call speedup_cleanup() when releasing the
  *       associated model/session.
  */
 void speedup_destroy(SpeedUPHandle handle);
 
 /**
- * @brief Gets the selection map of the latest single-input result.
+ * @brief Gets metadata from the latest single-input result.
  *
  * The returned array length equals the original item count.
- * Value 1 means the item is selected, and 0 means the item is skipped.
- *
  * @param[in] handle SpeedUP handle.
- * @return const int* Pointer to the selection map, or NULL if no valid result is available.
+ * @return const int* Pointer to result metadata, or NULL if no valid result is available.
  *
  * @note The returned pointer is owned by SpeedUP and remains valid until the next
  *       processing call, reset call, or handle destruction.
@@ -111,7 +108,7 @@ int speedup_get_input_count(SpeedUPHandle handle);
  *
  * @param[in] handle SpeedUP handle.
  *
- * @note This function clears selection state and counters. It does not detach RKNN3 callbacks.
+ * @note Session callbacks are not detached by this call.
  */
 void speedup_reset(SpeedUPHandle handle);
 
@@ -125,7 +122,7 @@ const char* speedup_get_version(void);
 /**
  * @brief Cleans up SpeedUP resources associated with an RKNN3 LLM session.
  *
- * If SpeedUP has attached an MRoPE input callback, this function restores the
+ * If SpeedUP has attached a session callback, this function restores the
  * original callback before destroying the handle.
  *
  * @param[in] handle SpeedUP handle.
@@ -140,16 +137,15 @@ void speedup_cleanup(SpeedUPHandle handle, rknn3_session* llm_sess);
 /**
  * @brief Processes embeddings with a total item count.
  *
- * This helper accepts the total item count for all media inputs and internally
- * dispatches to speedup_process_multi().
+ * Pass the total item count for all media inputs.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in,out] img_embeds Pointer to embeddings. The buffer is updated in place on success.
  * @param[in] n_images Number of media inputs in the request. Must be greater than 0.
  * @param[in] num_items Total number of embedding items. Must be divisible by n_images.
  * @param[in] embed_dim Embedding dimension for each item.
- * @param[in] speedup_ratio Acceleration ratio control. 0 disables acceleration, (0, 1) uses manual
- *                                output ratio, and 1 enables automatic ratio.
+ * @param[in] speedup_ratio Mode parameter. 0 disables SpeedUP and values in
+ *                          (0, 1) select Manual. 1 enables Auto for a single image only.
  * @param[in] llm_sess RKNN3 LLM session handle. Reserved for integrations requiring session context.
  * @param[out] out_output_count Pointer to receive the total output item count. May be NULL.
  * @return int Return status code:
@@ -168,17 +164,15 @@ int speedup_process_n(SpeedUPHandle handle,
 /**
  * @brief Processes embeddings with a fixed item count per media input.
  *
- * Manual mode uses the same output count for all media inputs. Automatic mode currently
- * handles single-input requests; multi-input automatic requests fall back to baseline mode.
- * On success, the embedding buffer is updated in place in contiguous media order.
+ * Use the same mode parameter for all media inputs.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in,out] img_embeds Pointer to embeddings in contiguous media order.
  * @param[in] n_images Number of media inputs in the request. Must be greater than 0.
  * @param[in] items_per_input Number of embedding items for each media input.
  * @param[in] embed_dim Embedding dimension for each item.
- * @param[in] speedup_ratio Acceleration ratio control. 0 disables acceleration, (0, 1) uses manual
- *                                output ratio, and 1 enables automatic ratio.
+ * @param[in] speedup_ratio Mode parameter. 0 disables SpeedUP and values in
+ *                          (0, 1) select Manual. 1 enables Auto for a single image only.
  * @param[in] llm_sess RKNN3 LLM session handle. Reserved for integrations requiring session context.
  * @param[out] out_output_count_per_input Pointer to receive the output item count per media input.
  *                                         May be NULL.
@@ -198,9 +192,7 @@ int speedup_process_multi(SpeedUPHandle handle,
 /**
  * @brief Prepares multimodal embeddings for LLM inference.
  *
- * This function configures runtime shape metadata and then processes
- * param->image_embed. Model-specific auxiliary inputs should be updated by the caller
- * using the selection state returned by SpeedUP.
+ * Use valid preparation parameters for the current model.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in] param Pointer to multimodal preparation parameters. Must not be NULL.
@@ -217,26 +209,40 @@ int speedup_prepare_multimodal(SpeedUPHandle handle,
 /**
  * @brief Prepares an RKNN3 multimodal tensor for LLM inference.
  *
- * This function derives embedding_dim from embed_shape, processes image_embed, and updates
- * the RKNN3 tensor item count to the output count per media input. Model-specific
- * auxiliary inputs should be updated by the caller after this function returns successfully.
+ * embed_shape must describe the complete contiguous FP16 image buffer as [N,T,D]
+ * or [N*T,D], where N=tensor->image.n_image and T=tensor->image.n_image_tokens
+ * BEFORE processing. D is the final axis; it is never divided by N. For one image,
+ * [T,D] and [1,T,D] are equivalent. All dimensions must be positive and N*T*D
+ * must not exceed INT32_MAX (the processing API uses signed int element offsets).
+ * Example: 16 inputs, 144 items each, 2560 dimensions require [16,144,2560] or
+ * [2304,2560]. A single-frame shape [144,2560] is rejected for this request.
+ * These checks also apply when speedup_ratio is 0.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in,out] image_embed Pointer to embeddings. The buffer is updated in place on success.
- * @param[in] embed_shape Pointer to the embedding shape array.
- * @param[in] embed_ndims Number of dimensions in embed_shape.
+ * @param[in] embed_shape Pointer to the complete embedding shape array.
+ * @param[in] embed_ndims Number of dimensions in embed_shape: 2 or 3.
  * @param[in,out] tensor Pointer to RKNN3 multimodal tensor. The related item count is
  *                       updated on success.
  * @param[in] model_width Model input width.
  * @param[in] model_height Model input height.
- * @param[in] speedup_ratio Acceleration ratio control. 0 disables acceleration, (0, 1) uses manual
- *                                output ratio, and 1 enables automatic ratio.
+ * @param[in] speedup_ratio Mode parameter. 0 disables SpeedUP and values in
+ *                          (0, 1) select Manual. 1 enables Auto for a single image only.
  * @param[in] llm_sess RKNN3 LLM session handle. Reserved for integrations requiring session context.
  * @param[out] out_output_count_per_input Pointer to receive the output item count per media input.
- *                                         May be NULL.
+ *                                         Set to 0 on failure. May be NULL.
  * @return int Return status code:
  *         - 0: Success
- *         - <0: Error code
+ *         - -1: Invalid arguments or shape. Shape errors report actual dimensions,
+ *               expected dimensions and the reason to stderr, before reading or
+ *               modifying the embedding buffer or tensor.
+ *         - <-1: Other processing error.
+ *
+ * @note On any returned error, image_embed and tensor remain unchanged.
+ *       The output count is set to 0. Do not use results from a failed call.
+ *       Normal inference may use the original data
+ *       only after restoring the original session callback successfully. If callback
+ *       restoration fails, stop inference and release the model/session.
  */
 int speedup_prepare_rknn_multimodal_tensor(SpeedUPHandle handle,
                                                 void* image_embed,
@@ -250,14 +256,13 @@ int speedup_prepare_rknn_multimodal_tensor(SpeedUPHandle handle,
                                                 int* out_output_count_per_input);
 
 /**
- * @brief Gets the selection map for one media input in the latest multi-input result.
+ * @brief Gets result metadata for one media input.
  *
- * The returned array length equals items_per_input. Value 1 means the item is selected,
- * and 0 means the item is skipped.
+ * The returned array length equals items_per_input.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in] image_index Media input index in the current request.
- * @return const int* Pointer to the selection map, or NULL for invalid input or unavailable result.
+ * @return const int* Pointer to result metadata, or NULL for invalid input or unavailable result.
  */
 const int* speedup_get_keep_mask_for_image(SpeedUPHandle handle, int image_index);
 
@@ -277,10 +282,7 @@ int speedup_get_num_images(SpeedUPHandle handle);
  */
 int speedup_get_output_count_per_input(SpeedUPHandle handle);
 
-// ===== RKNN3 runtime input callback support =====
-// Some RKNN3 multimodal LLM models provide auxiliary runtime inputs through input_callback.
-// SpeedUP maintains the required runtime data and fills each callback bucket according
-// to LLMInputCallbackParam::pos and item count.
+// ===== RKNN3 session integration =====
 
 /**
  * @brief Sets runtime grid metadata for each media input.
@@ -345,7 +347,7 @@ int speedup_set_mrope_grid_from_image_size(SpeedUPHandle handle,
 void speedup_reset_mrope(SpeedUPHandle handle);
 
 /**
- * @brief Fills one auxiliary input bucket in a custom RKNN3 input_callback implementation.
+ * @brief Provides runtime data for a custom RKNN3 input callback.
  *
  * @param[in] handle SpeedUP handle.
  * @param[out] dst Destination buffer for runtime values.
@@ -364,7 +366,7 @@ int speedup_fill_mrope_input(SpeedUPHandle handle,
 /**
  * @brief RKNN3 input callback used to fill auxiliary runtime tensors.
  *
- * Pass SpeedUPHandle as userdata. The function fills the matching runtime tensors and leaves other tensors unchanged.
+ * Pass SpeedUPHandle as userdata.
  *
  * @param[in] userdata SpeedUPHandle passed as callback userdata.
  * @param[in,out] input_tensors Pointer to RKNN3 input tensors supplied by the runtime.
@@ -382,9 +384,7 @@ int speedup_mrope_input_callback(void* userdata,
 /**
  * @brief Attaches SpeedUP runtime input callback to an RKNN3 LLM session.
  *
- * The public wrapper passes sizeof(rknn3_tensor_attr) from the application build to
- * libSpeedUP. This keeps the prebuilt library independent of later, compatible
- * rknn3_tensor_attr size extensions.
+ * Supply base_callback to preserve existing session behavior.
  *
  * @param[in] handle SpeedUP handle.
  * @param[in] rknn_ctx RKNN3 context handle used by the LLM model.

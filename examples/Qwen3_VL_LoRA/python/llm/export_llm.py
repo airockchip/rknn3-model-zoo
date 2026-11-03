@@ -15,9 +15,10 @@ from py_utils.tools import clear_llm_external_weight_in_dir, gen_qwen3_vl_quanti
 from transformers import AutoConfig # transformers==4.57.0
 
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from modeling_qwen3_vl import Qwen3VLForConditionalGeneration # 增加 num_logits_to_keep 输入
+from lora_node_map import build_hf_onnx_mapping
 
 TARGET_RESHAPE_NAME = "/language_model/Reshape_1"
 NEW_SHAPE = np.array([-1, 1], dtype=np.int64)
@@ -92,6 +93,12 @@ if __name__ == '__main__':
     parser.add_argument("--quant", action='store_true', help="Whether use GRQ quantization")
     parser.add_argument("--cali_dataset", default='./quant_data/model_inputs.json', help="some samples for grq quantized_algorithm")
     parser.add_argument("--modelscope", action='store_true', help="Whether download model from www.modelscope.cn")
+    parser.add_argument(
+        "--hf_onnx_map",
+        type=str,
+        default=None,
+        help="HF weight to ONNX op mapping output; defaults to <export_llm_path>.hf_onnx_map.json",
+    )
     args = parser.parse_args()
 
     if args.modelscope:
@@ -130,6 +137,13 @@ if __name__ == '__main__':
         model.model.language_model = QuantTool.quantize(quantized_dtype="w4a16", quantized_method="group32", quantized_algorithm="grq", dataset=dataset) 
 
         model = model.cpu()
+
+    # Keep the original HF names. LoRA keys are resolved against these names
+    # later, after export_rknn.py loads the generated mapping JSON.
+    hf_state_dict = {
+        name: value.detach().cpu()
+        for name, value in model.state_dict().items()
+    }
         
     export_llm_dirname = os.path.dirname(args.export_llm_path)
     if export_llm_dirname and not os.path.exists(export_llm_dirname):
@@ -187,5 +201,10 @@ if __name__ == '__main__':
 
     print(f"[INFO] Saving RKNN-compatible ONNX: {MODEL_IN}")
     onnx.save(model, MODEL_IN)
+
+    hf_onnx_map_path = args.hf_onnx_map
+    if hf_onnx_map_path is None:
+        hf_onnx_map_path = os.path.splitext(args.export_llm_path)[0] + '.hf_onnx_map.json'
+    build_hf_onnx_mapping(MODEL_IN, hf_state_dict, hf_onnx_map_path)
 
     print("[DONE] ONNX modification finished successfully")

@@ -1,0 +1,24 @@
+{
+  "questions": {
+    "sentiment": {
+      "type": "choice",
+      "instructions": "判断这条评价的整体情感倾向。",
+      "criteria": {
+        "positive": "正面评价，表达认可或满意",
+        "neutral": "中性评价，没有明显肯定或否定",
+        "negative": "负面评价，表达不满或批评"
+      }
+    },
+    "satisfaction": {
+      "type": "score",
+      "instructions": "判断评价者对商品或服务的满意程度。",
+      "criteria": [
+        "非常不满意",
+        "不满意",
+        "一般",
+        "满意",
+        "非常满意"
+      ]
+    }
+  }
+}

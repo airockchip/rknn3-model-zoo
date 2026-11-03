@@ -203,6 +203,7 @@ if __name__ == '__main__':
         args.model_path = snapshot_download(args.model_path)
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
     }
 

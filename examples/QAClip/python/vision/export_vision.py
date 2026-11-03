@@ -53,7 +53,7 @@ if __name__ == '__main__':
 
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
 
-    model = ChineseCLIPModel.from_pretrained(args.model_path, torch_dtype=torch.float32, trust_remote_code=True)
+    model = ChineseCLIPModel.from_pretrained(args.model_path, torch_dtype=torch.float32, trust_remote_code=True, attn_implementation="eager")
 
     export_dir = os.path.dirname(args.export_vision_path)
     if export_dir and not os.path.exists(export_dir):

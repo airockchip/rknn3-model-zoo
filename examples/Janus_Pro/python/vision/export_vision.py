@@ -27,11 +27,13 @@ if __name__ == '__main__':
         args.model_path = snapshot_download(args.model_path)
 
     kwargs = {   
+        'attn_implementation': 'eager',
         'device_map': "cpu",
         'trust_remote_code': True,
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     update_config(config, ['use_cache'], False)
+    update_config(config, ['_attn_implementation'], 'eager')
     kwargs['config'] = config
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **kwargs)
 

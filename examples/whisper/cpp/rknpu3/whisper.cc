@@ -66,6 +66,8 @@ int init_whisper_model(const char *model_path, rknn_app_context_t *app_ctx, cons
         return -1;
     }
 
+    app_ctx->rknn_ctx = ctx;
+
     // Load RKNN Model
     printf("Loading model: %s, weight: %s\n", model_path, weight_path ? weight_path : "NULL");
     // 检查权重文件是否存在
@@ -121,6 +123,68 @@ int init_whisper_model(const char *model_path, rknn_app_context_t *app_ctx, cons
     }
 
     app_ctx->n_kvcache_mems = 0;
+#ifdef RKNN3_MAX_CACHE_PAGE_TYPES
+    app_ctx->n_kvcache_bindings = 0;
+    bool paged_cache = false;
+    for (int i = 0; i < core_number; ++i) {
+        rknn3_kvcache_page_info info = {};
+        info.core_id = allocation_info[i].core_id;
+        ret = rknn3_query(ctx, RKNN3_QUERY_KVCACHE_PAGE_INFO, &info, sizeof(info));
+        if (ret != RKNN3_SUCCESS) {
+            return ret;
+        }
+        if (info.n_cache_types != 0 && !paged_cache) {
+            rknn3_llm_config llm = {};
+            ret = rknn3_query(ctx, RKNN3_QUERY_LLM_CONFIG, &llm, sizeof(llm));
+            if (ret != RKNN3_SUCCESS) return ret;
+            app_ctx->kvcache_residual_depth = llm.kvcache_residual_depth;
+            printf("KV residual depth: %u\n", app_ctx->kvcache_residual_depth);
+            if (app_ctx->kvcache_residual_depth != 32) return -1;
+        }
+        paged_cache = paged_cache || info.n_cache_types != 0;
+        if (info.n_cache_types > RKNN3_MAX_CACHE_PAGE_TYPES) {
+            return -1;
+        }
+        for (uint32_t request = 0; request < info.max_request_num; ++request) {
+            for (uint32_t type = 0; type < info.n_cache_types; ++type) {
+                const rknn3_cache_page_attr &attr = info.caches[type];
+                if (app_ctx->n_kvcache_bindings >= 32 || attr.max_page_num == 0 ||
+                    attr.max_page_num > 32 - app_ctx->n_kvcache_mems) {
+                    return -1;
+                }
+                std::vector<const rknn3_tensor_mem *> pages;
+                for (uint32_t page = 0; page < attr.max_page_num; ++page) {
+                    rknn3_tensor_mem *mem = rknn3_create_mem(
+                        ctx, attr.page_size, info.core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
+                    if (!mem || !mem->virt_addr) {
+                        if (mem) rknn3_destroy_mem(ctx, mem);
+                        return -1;
+                    }
+                    app_ctx->kvcache_mems[app_ctx->n_kvcache_mems++] = mem;
+                    memset(mem->virt_addr, 0, mem->size);
+                    ret = rknn3_mem_sync(ctx, mem, RKNN3_MEMORY_SYNC_TO_DEVICE);
+                    if (ret != RKNN3_SUCCESS) return ret;
+                    pages.push_back(mem);
+                }
+                rknn3_kvcache_page_binding binding = {};
+                binding.core_id = info.core_id;
+                binding.cache_type = attr.cache_type;
+                binding.request_index = request;
+                binding.n_pages = attr.max_page_num;
+                binding.pages = pages.data();
+                ret = rknn3_set_kvcache_pages(ctx, &binding, 1);
+                if (ret != RKNN3_SUCCESS) return ret;
+                printf("Bound paged KV cache: core=%d type=%d pages=%u page_size=%lu\n",
+                       info.core_id, attr.cache_type, attr.max_page_num,
+                       (unsigned long)attr.page_size);
+                binding.n_pages = 0;
+                binding.pages = NULL;
+                app_ctx->kvcache_bindings[app_ctx->n_kvcache_bindings++] = binding;
+            }
+        }
+    }
+    if (!paged_cache) {
+#endif
     for (int i = 0; i < core_number; ++i) {
         uint64_t kvcache_size = allocation_info[i].kvcache_mem.size;
         if (kvcache_size == 0) {
@@ -157,6 +221,10 @@ int init_whisper_model(const char *model_path, rknn_app_context_t *app_ctx, cons
         }
         printf("Bound KV cache memory for %u cores\n", app_ctx->n_kvcache_mems);
     }
+
+#ifdef RKNN3_MAX_CACHE_PAGE_TYPES
+    }
+#endif
 
     // Get Model Input Output Number
     rknn3_input_output_num io_num;
@@ -296,6 +364,14 @@ int release_whisper_model(rknn_app_context_t *app_ctx) {
             }
         }
     }
+#ifdef RKNN3_MAX_CACHE_PAGE_TYPES
+    if (app_ctx->n_kvcache_bindings > 0) {
+        int ret = rknn3_set_kvcache_pages(app_ctx->rknn_ctx, app_ctx->kvcache_bindings,
+                                         app_ctx->n_kvcache_bindings);
+        if (ret != RKNN3_SUCCESS) return ret;
+        app_ctx->n_kvcache_bindings = 0;
+    }
+#endif
     for (uint32_t i = 0; i < app_ctx->n_kvcache_mems; ++i) {
         if (app_ctx->kvcache_mems[i]) {
             rknn3_destroy_mem(app_ctx->rknn_ctx, app_ctx->kvcache_mems[i]);
@@ -646,12 +722,11 @@ bool whisper_is_cross_kv_hdns_4d(const rknn3_tensor_attr *attr) {
         return false;
     }
 
-    // HDNS: [H, D, N, S]
-    // Whisper base 常见: [8, 64, 1, 1500]
+    // HDNS: [H, D, N, S]. S follows the exported audio chunk length.
     return attr->shape[0] > 1 &&
            attr->shape[1] > 1 &&
            attr->shape[2] == 1 &&
-           attr->shape[3] >= 1000;
+           attr->shape[3] > 1;
 }
 
 bool whisper_is_cross_kv_nhsd_4d(const rknn3_tensor_attr *attr) {
@@ -663,7 +738,7 @@ bool whisper_is_cross_kv_nhsd_4d(const rknn3_tensor_attr *attr) {
     // Whisper base 常见: [1, 8, 1500, 64]
     return attr->shape[0] == 1 &&
            attr->shape[1] > 1 &&
-           attr->shape[2] >= 1000 &&
+           attr->shape[2] > 1 &&
            attr->shape[3] > 1;
 }
 
@@ -677,7 +752,7 @@ bool whisper_is_cross_kv_hdns_c1hwc2_5d(const rknn3_tensor_attr *attr) {
     return attr->shape[0] > 1 &&
            attr->shape[1] > 0 &&
            attr->shape[2] == 1 &&
-           attr->shape[3] >= 1000 &&
+           attr->shape[3] > 1 &&
            attr->shape[4] == 16;
 }
 
@@ -690,7 +765,7 @@ bool whisper_is_cross_kv_nc1hwc2_5d(const rknn3_tensor_attr *attr) {
     // Whisper base 常见: [1, 1, 1500, 64, 16]
     return attr->shape[0] == 1 &&
            attr->shape[1] == 1 &&
-           attr->shape[2] >= 1000 &&
+           attr->shape[2] > 1 &&
            attr->shape[3] > 1 &&
            attr->shape[4] >= 8;
 }
@@ -730,6 +805,8 @@ int whisper_repack_hdns_to_hdns_c1hwc2(rknn3_context dst_ctx, rknn3_tensor *dst,
 
     const float16 *src_data = reinterpret_cast<const float16 *>(src->mem->virt_addr);
     float16 *dst_data = reinterpret_cast<float16 *>(dst->mem->virt_addr);
+    const uint64_t *src_stride = src->attr->stride;
+    const uint64_t *dst_stride = dst->attr->stride;
 
     for (uint32_t h = 0; h < H; ++h) {
         for (uint32_t d = 0; d < D; ++d) {
@@ -738,8 +815,11 @@ int whisper_repack_hdns_to_hdns_c1hwc2(rknn3_context dst_ctx, rknn3_tensor *dst,
 
             for (uint32_t n = 0; n < N; ++n) {
                 for (uint32_t s = 0; s < S; ++s) {
-                    size_t src_off = (((size_t)h * D + d) * N + n) * S + s;
-                    size_t dst_off = ((((size_t)h * dst_D1 + d1) * dst_N + n) * dst_S + s) * dst_D2 + d2;
+                    size_t src_off = (size_t)h * src_stride[0] + (size_t)d * src_stride[1]
+                                   + (size_t)n * src_stride[2] + (size_t)s * src_stride[3];
+                    size_t dst_off = (size_t)h * dst_stride[0] + (size_t)d1 * dst_stride[1]
+                                   + (size_t)n * dst_stride[2] + (size_t)s * dst_stride[3]
+                                   + (size_t)d2 * dst_stride[4];
                     dst_data[dst_off] = src_data[src_off];
                 }
             }
@@ -780,7 +860,9 @@ int whisper_copy_tensor_data(rknn3_context dst_ctx, rknn3_tensor *dst, const rkn
 
     // 新 kv_hdns 模式 1：decode0 output [H,D,N,S] -> decode1 input [H,D,N,S]
     if (src_hdns && dst_hdns) {
-        if (src->attr->dtype != dst->attr->dtype || !whisper_same_shape(src->attr, dst->attr)) {
+        if (!whisper_same_shape(src->attr, dst->attr) ||
+            (src->attr->dtype != RKNN3_TENSOR_FLOAT16 && src->attr->dtype != RKNN3_TENSOR_FLOAT32) ||
+            (dst->attr->dtype != RKNN3_TENSOR_FLOAT16 && dst->attr->dtype != RKNN3_TENSOR_FLOAT32)) {
             printf("whisper_copy_tensor_data HDNS shape/dtype mismatch dst=%s src=%s\n",
                    dst->attr->name, src->attr->name);
             whisper_print_tensor_shape_brief("  src", src->attr);
@@ -788,9 +870,25 @@ int whisper_copy_tensor_data(rknn3_context dst_ctx, rknn3_tensor *dst, const rkn
             return -1;
         }
 
-        uint64_t copy_bytes = std::min<uint64_t>(whisper_tensor_active_aligned_size(src), whisper_tensor_active_aligned_size(dst));
         memset(dst->mem->virt_addr, 0, dst->mem->size);
-        memcpy(dst->mem->virt_addr, src->mem->virt_addr, copy_bytes);
+        for (uint32_t h = 0; h < src->attr->shape[0]; ++h) {
+            for (uint32_t d = 0; d < src->attr->shape[1]; ++d) {
+                for (uint32_t t = 0; t < src->attr->shape[3]; ++t) {
+                    size_t src_offset = h * src->attr->stride[0] + d * src->attr->stride[1]
+                                      + t * src->attr->stride[3];
+                    size_t dst_offset = h * dst->attr->stride[0] + d * dst->attr->stride[1]
+                                      + t * dst->attr->stride[3];
+                    float value = src->attr->dtype == RKNN3_TENSOR_FLOAT16
+                        ? fp16_to_fp32(reinterpret_cast<const float16 *>(src->mem->virt_addr)[src_offset])
+                        : reinterpret_cast<const float *>(src->mem->virt_addr)[src_offset];
+                    if (dst->attr->dtype == RKNN3_TENSOR_FLOAT16) {
+                        reinterpret_cast<float16 *>(dst->mem->virt_addr)[dst_offset] = fp32_to_fp16(value);
+                    } else {
+                        reinterpret_cast<float *>(dst->mem->virt_addr)[dst_offset] = value;
+                    }
+                }
+            }
+        }
 
         if (sync_to_device) {
             if (!dst_ctx) {

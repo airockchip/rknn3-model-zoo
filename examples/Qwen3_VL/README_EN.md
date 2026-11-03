@@ -157,8 +157,7 @@ After building, files are generated in `install/rk3588_linux_aarch64/rknn_Qwen3_
 
 ### 5.2 Run
 
-The C++ inference code automatically detects the model format and is compatible with both pruned and full models without code modification. To enable SpeedUP,
-append the optional `speedup_ratio` argument:
+The C++ demo remains compatible with the original command line. To use SpeedUP, provide its header and library for the target platform, then add `--enable_speedup` to the `build-linux.sh` command. At runtime, append the optional `speedup_ratio` argument:
 
 ```bash
 ./rknn_qwen3_vl_demo \

@@ -7,7 +7,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../.
 from py_utils.export_llm_helper import update_config
 from py_utils.export_vision_helper import export_minicpm3o_vision
 from py_utils.tools import clear_llm_external_weight_in_dir
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from MiniCPM_V_4.modeling_minicpmv import MiniCPMV
 
 
 if __name__ == '__main__':
@@ -27,13 +30,14 @@ if __name__ == '__main__':
         args.model_path = snapshot_download(args.model_path)
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     update_config(config, ['use_cache'], False)
     config.max_position_embeddings = args.max_position_embeddings
     kwargs['config'] = config
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, **kwargs)
+    model = MiniCPMV.from_pretrained(args.model_path, **kwargs)
     
     if args.quant and torch.cuda.is_available():
         from rknn.quantization.api import RKQuantizer

@@ -1,0 +1,22 @@
+<table border="1">
+<thead>
+<tr>
+<th>兴趣<br/>小组<br/>人数</th>
+<th>书法<br/>小组<br/>
+<th>绘画<br/>小组<br/>
+<th>饲养<br/>小组<br/>
+<th>田径<br/>小组<br/>
+<th>游泳<br/>小组<br/>
+</th></th></th></th></th></tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>

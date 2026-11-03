@@ -1,0 +1,22 @@
+{
+  "questions": {
+    "category": {
+      "type": "choice",
+      "instructions": "这个用户请求属于哪一类？",
+      "criteria": {
+        "account": "账号登录或访问问题",
+        "payment": "账单、扣款或支付问题",
+        "other": "其他问题"
+      }
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "判断请求的紧急程度。",
+      "criteria": [
+        "普通请求，无需立即处理",
+        "有时间要求，应尽快处理",
+        "紧急情况，需要立即处理"
+      ]
+    }
+  }
+}

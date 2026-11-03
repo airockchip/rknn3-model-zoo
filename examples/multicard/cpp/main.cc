@@ -39,7 +39,8 @@
 #include <vector>
 #include "nlohmann/json.hpp"
 
-#define LOGW(fmt, ...) printf("\033[33m" fmt "\033[0m", ##__VA_ARGS__)
+#define LOGE(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#define LOGW(fmt, ...) fprintf(stderr, "\033[33m" fmt "\033[0m", ##__VA_ARGS__)
 #define VLOG(fmt, ...) do { if (g_verbose) printf(fmt, ##__VA_ARGS__); } while (0)
 
 static size_t g_stage_count = 2;
@@ -541,6 +542,7 @@ struct CommandLineOptions
   bool        verbose = false;
   bool        ignore_eos = false;
   const char* rope_path = nullptr;
+  const char* custom_op_path = nullptr;
   const char* tensor_dump_dir = nullptr;
   std::vector<std::string> device_ids;
 
@@ -563,6 +565,7 @@ static void print_usage(const char* program)
   printf("  --verbose                     enable verbose logs\n");
   printf("  --ignore-eos                  ignore EOS during generation\n");
   printf("  --rope-tensor <safetensors>   external rope cache\n");
+  printf("  --custom-op-path <plugin.so>  custom op plugin; registered for every stage ctx\n");
   printf("  --device-id <id[#id...]>      device IDs separated by '#'; optional\n");
   printf("  --perf <input> <output>       performance test mode\n");
   printf("  --dump-tensors <dir>          dump callback tensors to this directory\n");
@@ -575,7 +578,7 @@ static bool take_option_value(int argc, char** argv, int* index,
 {
   if (!index || !value || *index + 1 >= argc || argv[*index + 1][0] == '\0' ||
       strncmp(argv[*index + 1], "--", 2) == 0) {
-    printf("%s requires a value\n", option);
+    LOGE("%s requires a value\n", option);
     return false;
   }
   *value = argv[++(*index)];
@@ -615,17 +618,25 @@ static bool validate_command_line_options(const CommandLineOptions& options)
       !options.embedding || !options.has_max_context_len ||
       !options.has_run_core_mask || !options.has_stage_count ||
       !options.has_bucket_size) {
-    printf("missing required command-line option\n");
+    LOGE("missing required command-line option\n");
     return false;
   }
   if (options.max_context_len <= 0 || options.stage_count == 0 || options.bucket_size == 0) {
-    printf("max-context-len, stage-count and bucket-size must be positive\n");
+    LOGE("max-context-len, stage-count and bucket-size must be positive\n");
     return false;
   }
   if (!options.device_ids.empty() && options.device_ids.size() != options.stage_count) {
-    printf("expected %zu --device-id values, got %zu\n",
+    LOGE("expected %zu --device-id values, got %zu\n",
            options.stage_count, options.device_ids.size());
     return false;
+  }
+  if (options.custom_op_path) {
+    struct stat st;
+    if (stat(options.custom_op_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+      LOGE("custom op plugin file not found or not a regular file: %s\n",
+             options.custom_op_path);
+      return false;
+    }
   }
   return true;
 }
@@ -653,14 +664,14 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
                strcmp(arg, "--max-context-len") == 0) {
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !parse_positive_i32(value, &options->max_context_len)) {
-        printf("%s requires a positive integer\n", arg);
+        LOGE("%s requires a positive integer\n", arg);
         return false;
       }
       options->has_max_context_len = true;
     } else if (strcmp(arg, "--core-mask") == 0 || strcmp(arg, "--run-core-mask") == 0) {
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !parse_core_mask(value, &options->run_core_mask)) {
-        printf("%s requires a valid hexadecimal mask\n", arg);
+        LOGE("%s requires a valid hexadecimal mask\n", arg);
         return false;
       }
       options->has_run_core_mask = true;
@@ -668,7 +679,7 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
       uint64_t parsed = 0;
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !parse_positive_u64(value, &parsed) || parsed > (uint64_t)(size_t)-1) {
-        printf("%s requires a positive integer\n", arg);
+        LOGE("%s requires a positive integer\n", arg);
         return false;
       }
       options->stage_count = (size_t)parsed;
@@ -676,7 +687,7 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
     } else if (strcmp(arg, "--bucket-size") == 0) {
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !parse_positive_u64(value, &options->bucket_size)) {
-        printf("%s requires a positive integer\n", arg);
+        LOGE("%s requires a positive integer\n", arg);
         return false;
       }
       options->has_bucket_size = true;
@@ -687,7 +698,7 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
       int32_t parsed = 0;
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !parse_positive_i32(value, &parsed)) {
-        printf("%s requires a positive integer\n", arg);
+        LOGE("%s requires a positive integer\n", arg);
         return false;
       }
       options->max_new_tokens = (int)parsed;
@@ -702,37 +713,44 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
     } else if (strcmp(arg, "--rope-tensor") == 0 || strcmp(arg, "--rope") == 0 ||
                strcmp(arg, "--rope-path") == 0) {
       if (!take_option_value(argc, argv, &i, arg, &options->rope_path)) return false;
+    } else if (strcmp(arg, "--custom-op-path") == 0 ||
+               strcmp(arg, "--custom_op_path") == 0) {
+      if (options->custom_op_path ||
+          !take_option_value(argc, argv, &i, arg, &options->custom_op_path)) {
+        LOGE("%s requires a value and can only be specified once\n", arg);
+        return false;
+      }
     } else if (strcmp(arg, "--device-id") == 0) {
       if (!take_option_value(argc, argv, &i, arg, &value) ||
           !append_device_ids(value, &options->device_ids)) {
-        printf("%s requires one or more device IDs separated by '#': id0#id1#...\n", arg);
+        LOGE("%s requires one or more device IDs separated by '#': id0#id1#...\n", arg);
         return false;
       }
     } else if (strcmp(arg, "--perf") == 0 || strcmp(arg, "--performance") == 0) {
       const char* input_value = nullptr;
       const char* output_value = nullptr;
       if (options->performance_mode) {
-        printf("performance mode can only be specified once\n");
+        LOGE("performance mode can only be specified once\n");
         return false;
       }
       if (!take_option_value(argc, argv, &i, arg, &input_value) ||
           !take_option_value(argc, argv, &i, arg, &output_value) ||
           !parse_positive_u64(input_value, &options->performance_input_length) ||
           !parse_positive_u64(output_value, &options->performance_output_length)) {
-        printf("%s requires positive <input_tokens> and <output_tokens>\n", arg);
+        LOGE("%s requires positive <input_tokens> and <output_tokens>\n", arg);
         return false;
       }
       options->performance_mode = true;
     } else if (strcmp(arg, "--dump-tensors") == 0) {
       if (options->tensor_dump_dir ||
           !take_option_value(argc, argv, &i, arg, &options->tensor_dump_dir)) {
-        printf("%s requires a value and can only be specified once\n", arg);
+        LOGE("%s requires a value and can only be specified once\n", arg);
         return false;
       }
     } else if (strcmp(arg, "--help") == 0) {
       return false;
     } else {
-      printf("unknown or positional argument in named mode: %s\n", arg);
+      LOGE("unknown or positional argument in named mode: %s\n", arg);
       return false;
     }
   }
@@ -743,7 +761,7 @@ static bool parse_named_command_line(int argc, char** argv, CommandLineOptions* 
 static bool parse_legacy_command_line(int argc, char** argv, CommandLineOptions* options)
 {
   if (argc < 9) {
-    printf("legacy mode requires 8 positional arguments\n");
+    LOGE("legacy mode requires 8 positional arguments\n");
     return false;
   }
 
@@ -753,14 +771,14 @@ static bool parse_legacy_command_line(int argc, char** argv, CommandLineOptions*
   options->embedding = argv[4];
   if (!parse_positive_i32(argv[5], &options->max_context_len) ||
       !parse_core_mask(argv[6], &options->run_core_mask)) {
-    printf("invalid legacy max_context_len or run_core_mask\n");
+    LOGE("invalid legacy max_context_len or run_core_mask\n");
     return false;
   }
   uint64_t parsed_stage_count = 0;
   if (!parse_positive_u64(argv[7], &parsed_stage_count) ||
       parsed_stage_count > (uint64_t)(size_t)-1 ||
       !parse_positive_u64(argv[8], &options->bucket_size)) {
-    printf("invalid legacy stage_count or bucket_size\n");
+    LOGE("invalid legacy stage_count or bucket_size\n");
     return false;
   }
   options->stage_count = (size_t)parsed_stage_count;
@@ -776,25 +794,32 @@ static bool parse_legacy_command_line(int argc, char** argv, CommandLineOptions*
       const char* input_value = nullptr;
       const char* output_value = nullptr;
       if (options->performance_mode) {
-        printf("performance mode can only be specified once\n");
+        LOGE("performance mode can only be specified once\n");
         return false;
       }
       if (!take_option_value(argc, argv, &i, arg, &input_value) ||
           !take_option_value(argc, argv, &i, arg, &output_value) ||
           !parse_positive_u64(input_value, &options->performance_input_length) ||
           !parse_positive_u64(output_value, &options->performance_output_length)) {
-        printf("%s requires positive <input_tokens> and <output_tokens>\n", arg);
+        LOGE("%s requires positive <input_tokens> and <output_tokens>\n", arg);
         return false;
       }
       options->performance_mode = true;
     } else if (strcmp(arg, "--dump-tensors") == 0) {
       if (options->tensor_dump_dir ||
           !take_option_value(argc, argv, &i, arg, &options->tensor_dump_dir)) {
-        printf("%s requires a value and can only be specified once\n", arg);
+        LOGE("%s requires a value and can only be specified once\n", arg);
+        return false;
+      }
+    } else if (strcmp(arg, "--custom-op-path") == 0 ||
+               strcmp(arg, "--custom_op_path") == 0) {
+      if (options->custom_op_path ||
+          !take_option_value(argc, argv, &i, arg, &options->custom_op_path)) {
+        LOGE("%s requires a value and can only be specified once\n", arg);
         return false;
       }
     } else if (arg[0] == '-') {
-      printf("unknown option in legacy mode: %s\n", arg);
+      LOGE("unknown option in legacy mode: %s\n", arg);
       return false;
     } else {
       optional_args.push_back(arg);
@@ -802,30 +827,30 @@ static bool parse_legacy_command_line(int argc, char** argv, CommandLineOptions*
   }
 
   if (optional_args.size() > 5 + options->stage_count) {
-    printf("too many legacy optional arguments\n");
+    LOGE("too many legacy optional arguments\n");
     return false;
   }
   if (optional_args.size() >= 1) options->prompt = optional_args[0];
   if (optional_args.size() >= 2) {
     int32_t parsed = 0;
     if (!parse_positive_i32(optional_args[1], &parsed)) {
-      printf("invalid legacy max_new_tokens: %s\n", optional_args[1]);
+      LOGE("invalid legacy max_new_tokens: %s\n", optional_args[1]);
       return false;
     }
     options->max_new_tokens = (int)parsed;
   }
   if (optional_args.size() >= 3 && !parse_bool01(optional_args[2], &options->verbose)) {
-    printf("legacy verbose must be 0 or 1\n");
+    LOGE("legacy verbose must be 0 or 1\n");
     return false;
   }
   if (optional_args.size() >= 4 && !parse_bool01(optional_args[3], &options->ignore_eos)) {
-    printf("legacy ignore_eos must be 0 or 1\n");
+    LOGE("legacy ignore_eos must be 0 or 1\n");
     return false;
   }
   if (optional_args.size() >= 5) options->rope_path = optional_args[4];
   for (size_t i = 5; i < optional_args.size(); ++i) {
     if (!append_device_ids(optional_args[i], &options->device_ids)) {
-      printf("invalid legacy device ID list: %s\n", optional_args[i]);
+      LOGE("invalid legacy device ID list: %s\n", optional_args[i]);
       return false;
     }
   }
@@ -889,12 +914,12 @@ static bool configure_tensor_dump(const char* path)
   struct stat st;
   if (stat(path, &st) == 0) {
     if (!S_ISDIR(st.st_mode)) {
-      printf("tensor dump path is not a directory: %s\n", path);
+      LOGE("tensor dump path is not a directory: %s\n", path);
       return false;
     }
   } else {
     if (errno != ENOENT || mkdir(path, 0755) != 0) {
-      printf("failed to create tensor dump directory: %s, error=%s\n",
+      LOGE("failed to create tensor dump directory: %s, error=%s\n",
              path, strerror(errno));
       return false;
     }
@@ -956,7 +981,7 @@ static void dump_tensor_data_locked(const char* callback_name,
   std::string data_path = base_path + ".bin";
   FILE* data_file = fopen(data_path.c_str(), "wb");
   if (!data_file) {
-    printf("failed to open tensor dump file: %s, error=%s\n",
+    LOGE("failed to open tensor dump file: %s, error=%s\n",
            data_path.c_str(), strerror(errno));
     return;
   }
@@ -969,14 +994,14 @@ static void dump_tensor_data_locked(const char* callback_name,
     write_ok = false;
   }
   if (!write_ok) {
-    printf("failed to write tensor dump file: %s\n", data_path.c_str());
+    LOGE("failed to write tensor dump file: %s\n", data_path.c_str());
     return;
   }
 
   std::string metadata_path = base_path + ".txt";
   FILE* metadata_file = fopen(metadata_path.c_str(), "w");
   if (!metadata_file) {
-    printf("failed to open tensor dump metadata: %s, error=%s\n",
+    LOGE("failed to open tensor dump metadata: %s, error=%s\n",
            metadata_path.c_str(), strerror(errno));
     return;
   }
@@ -1103,7 +1128,7 @@ static int tokenizer_callback(void* userdata, const char* text, int32_t text_len
   int n_tokens = tokenizer->Tokenize(text, text_len, tokens, n_tokens_max);
   VLOG("[tokenizer_callback] text=%s, text_len=%d, n_tokens=%d\n", text, text_len, n_tokens);
   if (n_tokens <= 0) {
-    printf("tokenizer failed for input text\n");
+    LOGE("tokenizer failed for input text\n");
   }
   return n_tokens;
 }
@@ -1117,7 +1142,7 @@ static int embed_callback(void* userdata, int32_t* tokens, uint64_t num_tokens, 
   }
 
   if (len != num_tokens * (uint64_t)info->embedding_dim * sizeof(float16)) {
-    printf("invalid embed buffer size\n");
+    LOGE("invalid embed buffer size\n");
     return -1;
   }
 
@@ -1275,26 +1300,26 @@ static int load_safetensors(const char* path, rope_cache_tensor caches[4],
 
   fd = open(path, O_RDONLY);
   if (fd < 0) {
-    printf("Failed to open safetensors file: %s\n", path);
+    LOGE("Failed to open safetensors file: %s\n", path);
     goto err;
   }
   if (fstat(fd, &st) < 0) {
-    printf("Failed to stat safetensors file: %s\n", path);
+    LOGE("Failed to stat safetensors file: %s\n", path);
     goto err;
   }
 
   if (read(fd, &header_size, 8) != 8) {
-    printf("Failed to read safetensors header size\n");
+    LOGE("Failed to read safetensors header size\n");
     goto err;
   }
   if (header_size == 0 || header_size > (uint64_t)st.st_size - 8) {
-    printf("Invalid safetensors header size: %" PRIu64 "\n", header_size);
+    LOGE("Invalid safetensors header size: %" PRIu64 "\n", header_size);
     goto err;
   }
 
   map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (map == MAP_FAILED) {
-    printf("Failed to mmap safetensors file: %s\n", path);
+    LOGE("Failed to mmap safetensors file: %s\n", path);
     goto err;
   }
 
@@ -1338,9 +1363,9 @@ static int load_safetensors(const char* path, rope_cache_tensor caches[4],
         n_rope_caches = 2;
         rope_format = RopeCacheFormat::QWEN35;
       } else {
-        printf("safetensors must contain either Gemma4 rope caches ");
-        printf("(rope_cos_cache_0/1, rope_sin_cache_0/1) or Qwen3.5 ");
-        printf("rope caches (rope_cos_cache, rope_sin_cache)\n");
+        LOGE("safetensors must contain either Gemma4 rope caches ");
+        LOGE("(rope_cos_cache_0/1, rope_sin_cache_0/1) or Qwen3.5 ");
+        LOGE("rope caches (rope_cos_cache, rope_sin_cache)\n");
         ret = -1;
       }
 
@@ -1356,7 +1381,7 @@ static int load_safetensors(const char* path, rope_cache_tensor caches[4],
 
         int n_dims = (int)shape_v.size();
         if (n_dims != 5 || layout != 3) {
-          printf("Tensor '%s': expected 5-D NC1HWC2 (layout=%d, n_dims=%d)\n",
+          LOGE("Tensor '%s': expected 5-D NC1HWC2 (layout=%d, n_dims=%d)\n",
                  rope_names[i], layout, n_dims);
           ret = -1;
           break;
@@ -1375,7 +1400,7 @@ static int load_safetensors(const char* path, rope_cache_tensor caches[4],
         *format_out = rope_format;
       }
     } catch (const nlohmann::json::exception& e) {
-      printf("Failed to parse safetensors JSON: %s\n", e.what());
+      LOGE("Failed to parse safetensors JSON: %s\n", e.what());
       ret = -1;
     }
   }
@@ -1400,14 +1425,14 @@ static int init_tokenizer_and_embedding(const char* tokenizer_path, const char* 
 
   embed_info->fd = open(embedding_path, O_RDONLY);
   if (embed_info->fd == -1) {
-    printf("Failed to open embedding file: %s\n", embedding_path);
+    LOGE("Failed to open embedding file: %s\n", embedding_path);
     delete *tokenizer;
     *tokenizer = nullptr;
     return -1;
   }
 
   if (fstat(embed_info->fd, emb_st) == -1) {
-    printf("Failed to get embedding file size\n");
+    LOGE("Failed to get embedding file size\n");
     close(embed_info->fd);
     embed_info->fd = -1;
     delete *tokenizer;
@@ -1417,7 +1442,7 @@ static int init_tokenizer_and_embedding(const char* tokenizer_path, const char* 
 
   embed_info->embedding_data = (float16*)mmap(NULL, emb_st->st_size, PROT_READ, MAP_PRIVATE, embed_info->fd, 0);
   if (embed_info->embedding_data == MAP_FAILED) {
-    printf("Failed to mmap embedding file\n");
+    LOGE("Failed to mmap embedding file\n");
     embed_info->embedding_data = nullptr;
     close(embed_info->fd);
     embed_info->fd = -1;
@@ -1437,7 +1462,7 @@ static int init_output_tensors(StageRuntime& stage)
   memset(&io_num, 0, sizeof(io_num));
   int ret = rknn3_query(stage.ctx, RKNN3_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] query io num failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] query io num failed, ret=%d\n", stage.name.c_str(), ret);
     return -1;
   }
 
@@ -1469,7 +1494,7 @@ static int init_output_tensors(StageRuntime& stage)
 
     ret = rknn3_query(stage.ctx, RKNN3_QUERY_OUTPUT_ATTR, stage.output_tensors[i].attr, sizeof(rknn3_tensor_attr));
     if (ret != RKNN3_SUCCESS) {
-      printf("[%s] query output attr[%u] failed, ret=%d\n", stage.name.c_str(), i, ret);
+      LOGE("[%s] query output attr[%u] failed, ret=%d\n", stage.name.c_str(), i, ret);
       // 释放前序已分配的资源
       for (uint32_t j = 0; j < i; ++j) {
         if (stage.output_tensors[j].mem) {
@@ -1492,7 +1517,7 @@ static int init_output_tensors(StageRuntime& stage)
                                                     stage.output_tensors[i].attr->core_id,
                                                     RKNN3_FLAG_MEMORY_CACHEABLE);
     if (!stage.output_tensors[i].mem) {
-      printf("[%s] create output mem[%u] failed\n", stage.name.c_str(), i);
+      LOGE("[%s] create output mem[%u] failed\n", stage.name.c_str(), i);
       // 释放前序已分配的资源
       for (uint32_t j = 0; j < i; ++j) {
         if (stage.output_tensors[j].mem) {
@@ -1520,7 +1545,7 @@ static int query_ext_input_indices(StageRuntime& stage)
   memset(&io_num, 0, sizeof(io_num));
   int ret = rknn3_query(stage.ctx, RKNN3_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] query io num for ext inputs failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] query io num for ext inputs failed, ret=%d\n", stage.name.c_str(), ret);
     return -1;
   }
 
@@ -1531,7 +1556,7 @@ static int query_ext_input_indices(StageRuntime& stage)
     attr.index = i;
     ret = rknn3_query(stage.ctx, RKNN3_QUERY_INPUT_ATTR, &attr, sizeof(attr));
     if (ret != RKNN3_SUCCESS) {
-      printf("[%s] query input attr[%u] failed, ret=%d\n", stage.name.c_str(), i, ret);
+      LOGE("[%s] query input attr[%u] failed, ret=%d\n", stage.name.c_str(), i, ret);
       return -1;
     }
     if (strcmp(attr.name, "per_layer_inputs") == 0) {
@@ -1547,7 +1572,7 @@ static int query_ext_input_indices(StageRuntime& stage)
 
   stage.ext_input_indices = (int*)malloc(n_ext * sizeof(int));
   if (!stage.ext_input_indices) {
-    printf("[%s] malloc ext_input_indices failed\n", stage.name.c_str());
+    LOGE("[%s] malloc ext_input_indices failed\n", stage.name.c_str());
     return -1;
   }
   stage.n_ext_inputs = 0;
@@ -1574,6 +1599,7 @@ static int query_ext_input_indices(StageRuntime& stage)
 static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stage_idx, const char* device_id,
                        const char* model_path, const char* weight_path, const rknn3_llm_param& session_param,
                        uint32_t run_core_mask,
+                       const char* custom_op_path,
                        bool is_last_stage, Tokenizer* tokenizer,
                        EmbedCallbackContext* embed_ctx,
                        InputCbUserdata* input_cb_data)
@@ -1592,13 +1618,13 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
 
   int ret = rknn3_init(&stage.ctx, &ext);
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] rknn3_init failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] rknn3_init failed, ret=%d\n", stage.name.c_str(), ret);
     return false;
   }
 
   ret = rknn3_load_model_from_path(stage.ctx, stage.model_path.c_str(), stage.weight_path.c_str());
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] rknn3_load_model_from_path failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] rknn3_load_model_from_path failed, ret=%d\n", stage.name.c_str(), ret);
     destroy_stage(stage);
     return false;
   }
@@ -1608,17 +1634,33 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
   cfg.run_core_mask = run_core_mask;
   ret = rknn3_model_init(stage.ctx, &cfg);
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] rknn3_model_init failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] rknn3_model_init failed, ret=%d\n", stage.name.c_str(), ret);
     destroy_stage(stage);
     return false;
   }
+
+  if (custom_op_path && custom_op_path[0] != '\0') {
+    printf("[%s] registering custom ops plugin: %s\n",
+           stage.name.c_str(), custom_op_path);
+    // Custom-op plugins are context-local. Register the plugin for every stage
+    // after model_init and before querying/creating the LLM session.
+    ret = rknn3_register_custom_ops_plugins(stage.ctx, custom_op_path, strlen(custom_op_path));
+    if (ret != RKNN3_SUCCESS) {
+      LOGE("[%s] rknn3_register_custom_ops_plugins failed, ret=%d\n",
+             stage.name.c_str(), ret);
+      destroy_stage(stage);
+      return false;
+    }
+    printf("[%s] rknn3_register_custom_ops_plugins success\n", stage.name.c_str());
+  }
+
   // rknn3_set_input_name_alias(stage.ctx, "inputs_embeds", "input_embeds");
   // rknn3_set_input_name_alias(stage.ctx, "hidden_states", "input_embeds");
   rknn3_llm_config llm_cfg;
   memset(&llm_cfg, 0, sizeof(llm_cfg));
   ret = rknn3_query(stage.ctx, RKNN3_QUERY_LLM_CONFIG, &llm_cfg, sizeof(llm_cfg));
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] query llm config failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] query llm config failed, ret=%d\n", stage.name.c_str(), ret);
     destroy_stage(stage);
     return false;
   }
@@ -1628,7 +1670,7 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
   stage.callback_ctx.embedding_dim = stage.embedding_dim;
 
   if (init_output_tensors(stage) != 0) {
-    printf("[%s] init output tensors failed\n", stage.name.c_str());
+    LOGE("[%s] init output tensors failed\n", stage.name.c_str());
     destroy_stage(stage);
     return false;
   }
@@ -1637,7 +1679,7 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
 
   stage.session = rknn3_session_init(stage.ctx, &local_param, 1);
   if (!stage.session) {
-    printf("[%s] rknn3_session_init failed\n", stage.name.c_str());
+    LOGE("[%s] rknn3_session_init failed\n", stage.name.c_str());
     destroy_stage(stage);
     return false;
   }
@@ -1662,7 +1704,7 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
   // 如果提供了 safetensors (rope caches)，则注册 input_callback 并设置 ext input indices
   if (input_cb_data && input_cb_data->rope_mmap_base) {
     if (query_ext_input_indices(stage) != 0) {
-      printf("[%s] query_ext_input_indices failed\n", stage.name.c_str());
+      LOGE("[%s] query_ext_input_indices failed\n", stage.name.c_str());
       destroy_stage(stage);
       return false;
     }
@@ -1677,7 +1719,7 @@ static bool init_stage(StageRuntime& stage, PipelineState& pipeline, size_t stag
 
   ret = rknn3_session_set_callback(stage.session, &callback);
   if (ret != RKNN3_SUCCESS) {
-    printf("[%s] rknn3_session_set_callback failed, ret=%d\n", stage.name.c_str(), ret);
+    LOGE("[%s] rknn3_session_set_callback failed, ret=%d\n", stage.name.c_str(), ret);
     destroy_stage(stage);
     return false;
   }
@@ -1727,14 +1769,14 @@ static void run_stage_worker(size_t stage_idx, std::vector<StageRuntime>& stages
 
     const TensorBlob* embed = pick_embed_tensor(batch.tensors);
     if (!embed || batch.n_tokens == 0 || stage.embedding_dim <= 0) {
-      printf("[stage%zu] invalid pipeline batch\n", stage_idx);
+      LOGE("[stage%zu] invalid pipeline batch\n", stage_idx);
       fail_pipeline(pipeline);
       return;
     }
 
     size_t embed_bytes = batch.n_tokens * (uint64_t)stage.embedding_dim * sizeof(float16);
     if (embed_bytes > embed->data.size()) {
-      printf("[stage%zu] embed buffer too small: need=%zu, got=%zu\n",
+      LOGE("[stage%zu] embed buffer too small: need=%zu, got=%zu\n",
              stage_idx, embed_bytes, embed->data.size());
       fail_pipeline(pipeline);
       return;
@@ -1778,7 +1820,7 @@ static void run_stage_worker(size_t stage_idx, std::vector<StageRuntime>& stages
       output_slot->active_input_tokens = 0;
     }
     if (ret != RKNN3_SUCCESS) {
-      printf("[stage%zu] run failed ret=%d\n", stage_idx, ret);
+      LOGE("[stage%zu] run failed ret=%d\n", stage_idx, ret);
       fail_pipeline(pipeline);
       return;
     }
@@ -1840,7 +1882,7 @@ static bool run_pipeline_once(std::vector<StageRuntime>& stages, PipelineState& 
   int ret = rknn3_session_run(stages[0].session, &first_input, 1, &infer_param);
   gettimeofday(&stage0_end, NULL);
   if (ret != RKNN3_SUCCESS) {
-    printf("[stage0] run failed ret=%d\n", ret);
+    LOGE("[stage0] run failed ret=%d\n", ret);
     fail_pipeline(pipeline);
   }
   close_stage_slot(*pipeline.slots[0]);
@@ -1881,6 +1923,7 @@ int main(int argc, char** argv)
   const char* base_weight_path = options.stage0_weight;
   const char* tokenizer_path = options.tokenizer;
   const char* embedding_path = options.embedding;
+  const char* custom_op_path = options.custom_op_path;
   int32_t max_context_len = options.max_context_len;
   uint32_t run_core_mask = options.run_core_mask;
   g_stage_count = options.stage_count;
@@ -1898,12 +1941,12 @@ int main(int argc, char** argv)
     if (arg_len >= 4 && strcmp(prompt_arg + arg_len - 4, ".txt") == 0) {
       int fd = open(prompt_arg, O_RDONLY);
       if (fd < 0) {
-        printf("Failed to open prompt file: %s\n", prompt_arg);
+        LOGE("Failed to open prompt file: %s\n", prompt_arg);
         return -1;
       }
       struct stat st;
       if (fstat(fd, &st) != 0) {
-        printf("Failed to stat prompt file: %s\n", prompt_arg);
+        LOGE("Failed to stat prompt file: %s\n", prompt_arg);
         close(fd);
         return -1;
       }
@@ -1911,7 +1954,7 @@ int main(int argc, char** argv)
       ssize_t n = read(fd, &prompt_buf[0], st.st_size);
       close(fd);
       if (n != st.st_size) {
-        printf("Failed to read prompt file: %s\n", prompt_arg);
+        LOGE("Failed to read prompt file: %s\n", prompt_arg);
         return -1;
       }
       prompt = prompt_buf.c_str();
@@ -1935,11 +1978,11 @@ int main(int argc, char** argv)
   std::vector<std::string> ext_device_ids = options.device_ids;
 
   if (g_stage_count < 1) {
-    printf("stage_count must be >= 1, got %zu\n", g_stage_count);
+    LOGE("stage_count must be >= 1, got %zu\n", g_stage_count);
     return -1;
   }
   if (max_context_len <= 0) {
-    printf("max_context_len must be > 0, got %d\n", max_context_len);
+    LOGE("max_context_len must be > 0, got %d\n", max_context_len);
     return -1;
   }
   if (g_performance_mode) {
@@ -1947,7 +1990,7 @@ int main(int argc, char** argv)
     uint64_t decode_input_tokens = performance_output_length - 1;
     if (performance_input_length > max_context_tokens ||
         decode_input_tokens > max_context_tokens - performance_input_length) {
-      printf("performance lengths exceed max_context_len: input=%llu, output=%llu, max_context_len=%d\n",
+      LOGE("performance lengths exceed max_context_len: input=%llu, output=%llu, max_context_len=%d\n",
              (unsigned long long)performance_input_length,
              (unsigned long long)performance_output_length,
              max_context_len);
@@ -1989,11 +2032,11 @@ int main(int argc, char** argv)
   for (size_t i = 0; i < g_stage_count; ++i) {
     struct stat st;
     if (stat(model_paths[i].c_str(), &st) != 0) {
-      printf("ERROR: model file not found: %s\n", model_paths[i].c_str());
+      LOGE("ERROR: model file not found: %s\n", model_paths[i].c_str());
       all_exist = false;
     }
     if (stat(weight_paths[i].c_str(), &st) != 0) {
-      printf("ERROR: weight file not found: %s\n", weight_paths[i].c_str());
+      LOGE("ERROR: weight file not found: %s\n", weight_paths[i].c_str());
       all_exist = false;
     }
   }
@@ -2051,7 +2094,7 @@ int main(int argc, char** argv)
   memset(&devs, 0, sizeof(devs));
   int ret = rknn3_find_devices(&devs);
   if (ret != RKNN3_SUCCESS) {
-    printf("find devices failed: ret=%d\n", ret);
+    LOGE("find devices failed: ret=%d\n", ret);
     release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
     return -1;
   }
@@ -2063,13 +2106,13 @@ int main(int argc, char** argv)
   if (ext_device_ids.empty()) {
     // 未指定外部 device_id，自动分配
     if (devs.n_devices < (int)g_stage_count) {
-      printf("auto-detect failed: found=%d devices, need=%zu\n", devs.n_devices, g_stage_count);
+      LOGE("auto-detect failed: found=%d devices, need=%zu\n", devs.n_devices, g_stage_count);
       release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
       return -1;
     }
     printf("auto-assigning %zu devices\n", g_stage_count);
   } else if ((int)ext_device_ids.size() < (int)g_stage_count) {
-    printf("not enough device_id arguments: need=%zu, got=%zu\n", g_stage_count, ext_device_ids.size());
+    LOGE("not enough device_id arguments: need=%zu, got=%zu\n", g_stage_count, ext_device_ids.size());
     release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
     return -1;
   } else {
@@ -2087,7 +2130,7 @@ int main(int argc, char** argv)
                          &input_cb_data.rope_format,
                          &input_cb_data.rope_fd, &input_cb_data.rope_mmap_base,
                          &input_cb_data.rope_mmap_size) != 0) {
-      printf("load_safetensors failed\n");
+      LOGE("load_safetensors failed\n");
       release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
       return -1;
     }
@@ -2098,6 +2141,7 @@ int main(int argc, char** argv)
     const char* device_id = ext_device_ids.empty() ? devs.devices[i].id : ext_device_ids[i].c_str();
     ok = init_stage(stages[i], pipeline, i, device_id,
                     model_paths[i].c_str(), weight_paths[i].c_str(), session_param, run_core_mask,
+                    custom_op_path,
                     i + 1 == stages.size(), tokenizer, &embed_ctx, &input_cb_data);
     if (!ok) {
       break;
@@ -2113,7 +2157,7 @@ int main(int argc, char** argv)
     uint64_t required_context_tokens = performance_input_length + performance_output_length - 1;
     for (const auto& stage : stages) {
       if (stage.max_ctx_len > 0 && required_context_tokens > (uint64_t)stage.max_ctx_len) {
-        printf("performance lengths exceed %s max context: required=%llu, max=%d\n",
+        LOGE("performance lengths exceed %s max context: required=%llu, max=%d\n",
                stage.name.c_str(),
                (unsigned long long)required_context_tokens,
                stage.max_ctx_len);
@@ -2140,7 +2184,7 @@ int main(int argc, char** argv)
       g_performance_mode ? &performance_input_tokens : nullptr;
   if (!run_pipeline_once(stages, pipeline, prefill_prompt, prefill_input_tokens,
                          InferencePhase::PREFILL, &prefill_tokens)) {
-    printf("prefill failed\n");
+    LOGE("prefill failed\n");
     release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
     return -1;
   }
@@ -2151,7 +2195,7 @@ int main(int argc, char** argv)
 
   printf("\n=== Decode Loop ===\n");
   if (next_token < 0) {
-    printf("prefill did not return token from result_callback\n");
+    LOGE("prefill did not return token from result_callback\n");
     release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);
     return -1;
   }
@@ -2168,12 +2212,12 @@ int main(int argc, char** argv)
 
     if (!run_pipeline_once(stages, pipeline, nullptr, &token_vec,
                            InferencePhase::DECODE, nullptr)) {
-      printf("decode step %llu failed\n", (unsigned long long)(step + 1));
+      LOGE("decode step %llu failed\n", (unsigned long long)(step + 1));
       break;
     }
 
     if (!get_last_stage_token(&next_token)) {
-      printf("decode step %llu did not return token from result_callback\n",
+      LOGE("decode step %llu did not return token from result_callback\n",
              (unsigned long long)(step + 1));
       break;
     }
@@ -2198,7 +2242,7 @@ int main(int argc, char** argv)
   print_performance_statistics(prefill_tokens, prefill_ms, decode_tokens, decode_ms);
   print_stage_performance_statistics(stages);
   for (size_t i = 0; i < stages.size(); ++i) {
-    rknn3_session_clear_kvcache(stages[i].session, RKNN3_KVCACHE_CLEAR_ALL);
+    rknn3_session_clear_kvcache(stages[i].session, RKNN3_KVCACHE_CLEAR_ALL, nullptr);
   }
 
   release_resources(stages, &input_cb_data, &embed_info, emb_st.st_size, tokenizer);

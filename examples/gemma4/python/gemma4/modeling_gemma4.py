@@ -338,6 +338,87 @@ class Gemma4AudioAttention(nn.Module):
 
         return attn_output, attn_weights
 
+    def forward_stream(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        past_key: torch.Tensor,
+        past_value: torch.Tensor,
+        past_mask: torch.Tensor,
+        current_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run one or more fixed attention blocks with explicit KV cache.
+
+        ``past_key`` and ``past_value`` use ``[B, H, 12, D]`` layout.  Keys
+        are cached after applying ``k_scale`` so a cached tensor can be used
+        directly by the next chunk without re-projecting past hidden states.
+        The current sequence must contain complete 12-token blocks.  Attention
+        inside the current call uses the same overlapping 12-token history as
+        the offline blocked implementation, while only the final block is
+        returned as state for the next call.
+        """
+        batch_size, seq_length, _ = hidden_states.shape
+        query_states = self.q_proj(hidden_states).float().view(batch_size, seq_length, self.num_heads, self.head_dim)
+        key_states = self.k_proj(hidden_states).float().view(batch_size, seq_length, self.num_heads, self.head_dim)
+        value_states = self.v_proj(hidden_states).float().view(batch_size, seq_length, self.num_heads, self.head_dim)
+        query_states = query_states * self.q_scale * F.softplus(self.per_dim_scale)
+        key_states = key_states * self.k_scale
+
+        query_blocks = self._convert_to_block(query_states)
+        num_blocks = query_blocks.shape[1]
+        queries = query_blocks.permute(0, 3, 1, 2, 4)
+        current_key = key_states.permute(0, 2, 1, 3).contiguous()
+        current_value = value_states.permute(0, 2, 1, 3).contiguous()
+        # Store the external cache with an exact power-of-two encoding.  This
+        # keeps it as ordinary model IO instead of letting RKNN3 rewrite this
+        # Audio attention state into its LLM-native KV-cache interface.
+        decoded_past_key = past_key * 0.5
+        decoded_past_value = past_value * 0.5
+        all_key = torch.cat((decoded_past_key, current_key), dim=2).permute(0, 2, 1, 3)
+        all_value = torch.cat((decoded_past_value, current_value), dim=2).permute(0, 2, 1, 3)
+        block_starts = torch.arange(num_blocks, device=hidden_states.device) * self.chunk_size
+        context_offsets = torch.arange(self.context_size, device=hidden_states.device)
+        context_indices = block_starts[:, None] + context_offsets[None, :]
+        key_context = all_key[:, context_indices].contiguous()
+        value_context = all_value[:, context_indices].contiguous()
+        matrix_ac = queries @ key_context.permute(0, 3, 1, 4, 2)
+
+        relative_key_states = self.relative_k_proj(position_embeddings)
+        relative_key_states = relative_key_states.view(-1, self.num_heads, self.head_dim)
+        relative_key_states = relative_key_states.to(dtype=query_states.dtype)
+        queries_flat = queries.reshape(batch_size, self.num_heads, -1, self.head_dim)
+        matrix_bd = queries_flat @ relative_key_states.permute(1, 2, 0)
+        matrix_bd = matrix_bd.reshape(batch_size, self.num_heads, num_blocks, self.chunk_size, -1)
+        matrix_bd = self._rel_shift(matrix_bd)
+
+        attn_weights = matrix_ac + matrix_bd
+        attn_weights = torch.tanh(attn_weights / self.softcap) * self.softcap
+        all_mask = torch.cat((past_mask, current_mask), dim=-1).to(dtype=torch.bool)
+        context_mask = all_mask[:, context_indices]
+        relative_positions = torch.arange(-self.max_past_horizon, self.chunk_size,
+                                          device=hidden_states.device)
+        query_positions = torch.arange(self.chunk_size, device=hidden_states.device)[:, None]
+        local_mask = (
+            (query_positions - relative_positions[None, :] >= 0)
+            & (query_positions - relative_positions[None, :] < self.max_past_horizon)
+        )
+        stream_mask = local_mask[None, None, None, :, :] & context_mask[:, None, :, None, :]
+        attn_weights = attn_weights.masked_fill(
+            stream_mask.logical_not(), self.config.attention_invalid_logits_value
+        )
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_context.dtype)
+        attn_output = attn_weights @ value_context.permute(0, 3, 1, 2, 4)
+        attn_output = attn_output.permute(0, 2, 3, 1, 4).reshape(
+            batch_size, num_blocks * self.chunk_size, -1
+        )
+        attn_output = attn_output[:, :seq_length].contiguous()
+        attn_output = self.post(attn_output.to(dtype=self.post.linear.weight.dtype))
+        return (
+            attn_output,
+            current_key[:, :, -self.chunk_size :] * 2.0,
+            current_value[:, :, -self.chunk_size :] * 2.0,
+        )
+
 
 class Gemma4AudioSubSampleConvProjectionLayer(nn.Module):
     def __init__(self, in_channels, out_channels, norm_eps):
@@ -365,6 +446,50 @@ class Gemma4AudioSubSampleConvProjectionLayer(nn.Module):
             mask = mask[:, ::2]
 
         return hidden_states, mask
+
+    def forward_stream(
+        self,
+        hidden_states: torch.Tensor,
+        state: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Run one temporal Conv2d layer with an explicit one-frame state.
+
+        The offline layer uses kernel=3/stride=2/padding=1 in time. For fixed
+        even-sized streaming chunks, the equivalent stateful form keeps the
+        previous input frame, applies only frequency padding, and emits the
+        next output frames without recomputing the previous chunk.
+        """
+        if mask is not None:
+            mask = mask.to(device=hidden_states.device)
+            hidden_states = hidden_states * mask[:, None, :, None]
+
+        if state is None:
+            state = torch.zeros(
+                hidden_states.shape[0], hidden_states.shape[1], 1,
+                hidden_states.shape[3], dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        conv_input = torch.cat((state.to(hidden_states.dtype), hidden_states), dim=2)
+        # Offline Conv2d padding=(1,1); the temporal left padding is the state,
+        # while the frequency padding remains explicit.
+        conv_input = F.pad(conv_input, (1, 1, 0, 0))
+        hidden_states = F.conv2d(
+            conv_input.to(self.conv.weight.dtype),
+            self.conv.weight,
+            self.conv.bias,
+            stride=self.conv.stride,
+            padding=0,
+            dilation=self.conv.dilation,
+            groups=self.conv.groups,
+        )
+        hidden_states = self.act(
+            self.norm(hidden_states.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
+        )
+        next_state = conv_input[:, :, -1:, 1:-1].contiguous()
+        if mask is not None:
+            mask = mask[:, ::2]
+        return hidden_states, mask, next_state
 
 
 class Gemma4AudioSubSampleConvProjection(nn.Module):
@@ -395,6 +520,24 @@ class Gemma4AudioSubSampleConvProjection(nn.Module):
         batch_size, _, seq_len, _ = hidden_states.shape
         hidden_states = hidden_states.permute(0, 2, 3, 1).contiguous().reshape(batch_size, seq_len, -1)
         return self.input_proj_linear(hidden_states), mask
+
+    def forward_stream(
+        self,
+        input_features: torch.Tensor,
+        input_features_mask: torch.Tensor,
+        state0: torch.Tensor,
+        state1: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_states = input_features.unsqueeze(1)
+        hidden_states, mask, next_state0 = self.layer0.forward_stream(
+            hidden_states, state0, input_features_mask
+        )
+        hidden_states, mask, next_state1 = self.layer1.forward_stream(
+            hidden_states, state1, mask
+        )
+        batch_size, _, seq_len, _ = hidden_states.shape
+        hidden_states = hidden_states.permute(0, 2, 3, 1).contiguous().reshape(batch_size, seq_len, -1)
+        return self.input_proj_linear(hidden_states), mask, next_state0, next_state1
 
 
 class Gemma4AudioFeedForward(nn.Module):
@@ -465,6 +608,22 @@ class Gemma4AudioCausalConv1d(nn.Conv1d):
 
         return super().forward(x)
 
+    def forward_stream(self, x: torch.Tensor, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Causal Conv1d with a fixed four-frame history state."""
+        if state is None:
+            state = torch.zeros(
+                x.shape[0], x.shape[1], self.left_pad,
+                dtype=x.dtype, device=x.device,
+            )
+        conv_input = torch.cat((state.to(x.dtype), x), dim=-1)
+        output = F.conv1d(
+            conv_input.to(self.weight.dtype), self.weight, self.bias,
+            stride=self.stride, padding=0, dilation=self.dilation,
+            groups=self.groups,
+        )
+        next_state = conv_input[:, :, -self.left_pad:].contiguous()
+        return output, next_state
+
 
 class Gemma4AudioLightConv1d(nn.Module):
     def __init__(self, config: Gemma4AudioConfig):
@@ -505,6 +664,28 @@ class Gemma4AudioLightConv1d(nn.Module):
         hidden_states = self.linear_end(hidden_states)
         hidden_states += residual
         return hidden_states
+
+    def forward_stream(
+        self, hidden_states: torch.Tensor, state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = hidden_states
+        hidden_states = self.pre_layer_norm(hidden_states)
+        hidden_states = self.linear_start(hidden_states)
+        hidden_states = nn.functional.glu(hidden_states, dim=-1)
+        hidden_states, next_state = self.depthwise_conv1d.forward_stream(
+            hidden_states.transpose(1, 2), state
+        )
+        hidden_states = hidden_states.transpose(1, 2)
+        gradient_clipping = min(
+            self.gradient_clipping,
+            torch.finfo(self.linear_start.linear.weight.dtype).max,
+        )
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.conv_norm(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states = self.linear_end(hidden_states)
+        hidden_states += residual
+        return hidden_states, next_state
 
 
 class Gemma4AudioLayer(nn.Module):
@@ -556,6 +737,38 @@ class Gemma4AudioLayer(nn.Module):
         hidden_states = self.norm_out(hidden_states)
 
         return hidden_states
+
+    def forward_stream(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        past_key: torch.Tensor,
+        past_value: torch.Tensor,
+        past_mask: torch.Tensor,
+        conv_state: torch.Tensor,
+        current_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        gradient_clipping = min(
+            self.gradient_clipping,
+            torch.finfo(self.norm_pre_attn.weight.dtype).max,
+        )
+        hidden_states = self.feed_forward1(hidden_states)
+        residual = hidden_states
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.norm_pre_attn(hidden_states)
+
+        hidden_states, next_key, next_value = self.self_attn.forward_stream(
+            hidden_states, position_embeddings, past_key, past_value, past_mask, current_mask
+        )
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.norm_post_attn(hidden_states)
+        hidden_states += residual
+
+        hidden_states, next_conv_state = self.lconv1d.forward_stream(hidden_states, conv_state)
+        hidden_states = self.feed_forward2(hidden_states)
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.norm_out(hidden_states)
+        return hidden_states, next_key, next_value, next_conv_state
 
 
 # ---- Vision Encoder Layers ----
@@ -1953,6 +2166,47 @@ class Gemma4AudioModel(Gemma4PreTrainedModel):
 
         hidden_states = self.output_proj(hidden_states)
         return Gemma4AudioModelOutput(last_hidden_state=hidden_states, attention_mask=output_mask)
+
+    def forward_stream(
+        self,
+        input_features: torch.Tensor,
+        input_features_mask: torch.Tensor,
+        conv_state_0: torch.Tensor,
+        conv_state_1: torch.Tensor,
+        past_mask: torch.Tensor,
+        *layer_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Stateful block-aligned Audio Tower forward.
+
+        ``layer_states`` contains three tensors per encoder layer in order:
+        previous attention key, value, and causal-conv history.
+        The model emits one or more 12-token attention blocks per call and
+        returns only the final block's attention K/V as cross-call state.
+        """
+        expected = 3 * len(self.layers)
+        if len(layer_states) != expected:
+            raise ValueError(f"expected {expected} layer state tensors, got {len(layer_states)}")
+        hidden_states, output_mask, next_conv0, next_conv1 = self.subsample_conv_projection.forward_stream(
+            input_features, input_features_mask, conv_state_0, conv_state_1
+        )
+        position_embeddings = self.rel_pos_enc(hidden_states)
+        next_states = []
+        for i, encoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+            past_key = layer_states[3 * i]
+            past_value = layer_states[3 * i + 1]
+            conv_state = layer_states[3 * i + 2]
+            hidden_states, next_key, next_value, next_conv = encoder_layer.forward_stream(
+                hidden_states,
+                position_embeddings,
+                past_key,
+                past_value,
+                past_mask,
+                conv_state,
+                output_mask,
+            )
+            next_states.extend((next_key, next_value, next_conv))
+        hidden_states = self.output_proj(hidden_states)
+        return hidden_states, output_mask, tuple((next_conv0, next_conv1, *next_states))
 
 
 class Gemma4VisionModel(Gemma4PreTrainedModel):

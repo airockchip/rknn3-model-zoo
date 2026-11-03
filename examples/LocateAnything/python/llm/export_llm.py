@@ -131,9 +131,9 @@ def prepare_export_config(config):
         config.vision_config.rope_parameters = None
     update_config(config, ["use_cache"], False)
     update_config(config, ["_attn_implementation_autoset"], False)
-    config._attn_implementation = 'sdpa'
-    config.text_config._attn_implementation = 'sdpa'
-    config.vision_config._attn_implementation = 'sdpa'
+    config._attn_implementation = 'eager'
+    config.text_config._attn_implementation = 'eager'
+    config.vision_config._attn_implementation = 'eager'
     return config
 
 

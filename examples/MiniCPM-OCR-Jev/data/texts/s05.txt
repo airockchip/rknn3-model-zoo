@@ -1,0 +1,1 @@
+L(\tau ,z)\alpha \coloneqq e^{-\tau /z}\alpha -\sum_{\substack{d\in \operatorname{Eff}_{\neq 0}\\ 0\leq \ell \leq \dim H^{*}(X) - 1}}\left\langle \phi^{\ell},\frac{e^{-\tau /z}\alpha}{z + \psi}\right\rangle_{0,2,d}e^{\langle \tau ,d\rangle}\phi_{\ell},

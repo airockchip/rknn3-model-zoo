@@ -38,12 +38,12 @@ add_executable(${PROJECT_NAME}
     ${vision_file}
 )
 
-if(EXISTS "${SPEEDUP_LIB}" AND EXISTS "${SPEEDUP_INCLUDES}/speedup.h")
+if(ENABLE_SPEEDUP)
     message(STATUS "Found SpeedUP = ${SPEEDUP_LIB}")
     install(PROGRAMS ${SPEEDUP_LIB} DESTINATION lib)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_SPEEDUP)
 else()
-    message(WARNING "SpeedUP not found, build without SpeedUP support")
+    message(STATUS "SpeedUP disabled")
     set(SPEEDUP_LIB "")
 endif()
 

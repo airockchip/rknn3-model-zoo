@@ -344,7 +344,76 @@ gemma-4-12b-it_seg1.safetensors
 
 Gemma-4 同样默认使用外置 rope cache。不同分段均会生成一个内容相同的 `.safetensors` 文件，运行时传入任意一个即可。
 
-### 3.3 使用 `--rebuild` 修改 KV Cache 配置
+### 3.3 分段导出参数配置
+
+#### `--max_context_len`
+
+ `export_rknn_segment.py` 支持通过 `--max_context_len` 从命令行覆盖脚本内的 `MAX_CONTEXT_LEN` 默认值。不传该参数时使用默认值 `4096`；该值会同时用于 `kvcache_buffer_len` 和 `max_position_embeddings`。
+
+例如将最大上下文长度设置为 8192：
+
+```bash
+cd examples/multicard/python/qwen3_5
+python export_rknn_segment.py --multi_segment --num_segments 2 --max_context_len 8192
+```
+
+该参数应设置为正整数，并结合目标设备的内存容量选择合适的上下文长度。
+
+#### `--segment_layer_counts`
+
+`--segment_layer_counts c1 c2 ...` 仅用于 LLM/ONNX 分段导出脚本，用于手动指定每个分段包含的连续 Transformer block 数量。列表长度就是分段数，所有数值之和必须等于模型的 block 总数；配置后会覆盖 `--num_segments` 的自动切分策略。参数使用空格分隔整数，不要写成 Python 列表或逗号分隔字符串。Qwen3、Qwen3.5、Gemma4、MiniCPM5 四种模型均支持。
+
+例如，假设模型共有 32 个 Transformer block，手动切成 3 段：
+
+```bash
+cd examples/multicard/python/qwen3_5
+python export_llm_segment.py \
+    --multi_segment \
+    --segment_layer_counts 8 8 16
+```
+
+上述配置对应：
+
+```text
+seg0: block 0    - 7
+seg1: block 8    - 15
+seg2: block 16   - 31 + norm + lm_head
+```
+
+不提供 `--segment_layer_counts` 时，`export_llm_segment.py --multi_segment --num_segments N` 会按目标卡内存估算，自动规划 N 个连续分段（默认约每 8 层一段）。`--card` 选择估算卡型，默认 `rk1828`；默认可用容量按标称容量的 98% 计算：rk1828 为 4900 MiB、rk1820 为 2450 MiB。实际可用内存不同时，可用 `--card_usable_mib` 指定每卡容量。
+
+```bash
+cd examples/multicard/python/qwen3_5
+python export_llm_segment.py \
+    --multi_segment --num_segments 4 \
+    --card rk1828 --card_usable_mib 4800
+```
+
+导出成功后，脚本会在 `--export_llm_path` 同目录生成同名前缀的 `.segment_plan.json`，包含实际使用的 `segment_layer_counts`、建议的 `MAX_CONTEXT_LEN`（JSON 字段 `suggested_MAX_CONTEXT_LEN`）以及各卡的 block 权重、末段 norm/lm_head 权重、KV cache、内部 scratch、固定开销、总内存和剩余内存估算。手动指定分段时，JSON 中的上限是该固定分法可承受的上限；`--stop_after_segment` 只导出前缀时，JSON 仍规划完整模型，并用 `exported_segment_indices` 标出已导出的段。
+
+估算沿用 `qwen3_5/estimate_plan_v2.py` 的 KV 对齐、每卡 6144 B/token scratch 和 32 MiB 固定开销；Qwen3.5 经过 RKNN 报告标定，其余模型是外推。Gemma4 的 1024-token FP16 滑动窗口及 Qwen3.5 的线性注意力状态分别计入 KV。规划值仅供参考：将 JSON 中的 `suggested_MAX_CONTEXT_LEN` 作为对应 `export_rknn_segment.py --max_context_len` 的起点，最终以每卡实际 RKNN `model_report` 和板端运行结果校验。若 JSON 的 `feasible` 为 `false` / 上限为 0，当前卡数和容量的估算下不能部署该分段组合。
+
+#### `--profile_mode` 和 `--save_ctx`
+
+这两个参数仅用于 `export_rknn_segment.py`，可以独立使用，默认均关闭：
+
+| 参数 | 作用 |
+|------|------|
+| `--profile_mode` | 开启 RKNN profile 模式，为逐层精度/性能分析保留所需的 profile 信息 |
+| `--save_ctx` | 导出 RKNN context 文件，供运行时 `load_rknn(load_ctx=True)` 使用 |
+
+以 Qwen3.5 两段模型为例：
+
+```bash
+cd examples/multicard/python/qwen3_5
+python export_rknn_segment.py \
+    --multi_segment \
+    --num_segments 2 \
+    --profile_mode \
+    --save_ctx
+```
+
+### 3.4 使用 `--rebuild` 修改 KV Cache 配置
 
 如果已经完成过 RKNN 导出，不需要重新执行完整的 ONNX 构建流程即可调整 KV Cache 长度。以两段模型为例，首次完整导出后，当前导出目录下会保留每一段对应的构建临时目录：
 
@@ -353,28 +422,28 @@ tmp_seg0/
 tmp_seg1/
 ```
 
-修改对应模型导出脚本中的 `kvcache_buffer_len` 后，使用 `--rebuild` 复用上述目录中的构建结果并重新导出 RKNN：
+通过 `--max_context_len` 设置新的上下文长度，再用 `--rebuild` 复用上述目录中的构建结果并重新导出 RKNN；不需要修改脚本常量：
 
-Qwen3.5：修改 `examples/multicard/python/qwen3_5/export_rknn_segment.py` 中 `_build_llm_config` 的 `kvcache_buffer_len`，然后执行：
+Qwen3.5：
 
 ```bash
 cd examples/multicard/python/qwen3_5
 python export_rknn_segment.py \
-    --multi_segment --num_segments 2 --rebuild
+    --multi_segment --num_segments 2 --max_context_len 8192 --rebuild
 ```
 
-Gemma-4：修改 `examples/multicard/python/gemma4/export_rknn_segment.py` 中 `_build_rknn_config` 的 `kvcache_buffer_len`，然后执行：
+Gemma-4：
 
 ```bash
 cd examples/multicard/python/gemma4
 python export_rknn_segment.py \
-    --multi_segment --num_segments 2 --rebuild
+    --multi_segment --num_segments 2 --max_context_len 8192 --rebuild
 ```
 
 `--rebuild` 会依次执行以下操作：
 
 1. 将 `tmp_seg0`、`tmp_seg1` 依次恢复为 `tmp`。
-2. 使用修改后的 `kvcache_buffer_len` 调用 `rknn.rebuild("./tmp")`。
+2. 使用 `--max_context_len` 设置的 KV Cache 长度调用 `rknn.rebuild("./tmp")`。
 3. 导出新的 `*_seg0.rknn`、`*_seg1.rknn`，并将新的临时目录分别保存回 `tmp_seg0`、`tmp_seg1`。
 
 注意事项：
@@ -440,6 +509,7 @@ adb push Qwen3.5-9B-llm_seg0.safetensors /data/models/multicard/
     --bucket-size <tokens> \
     [--prompt <text-or-file>] [--predict <count>] \
     [--verbose] [--ignore-eos] [--rope-tensor <safetensors>] \
+    [--custom-op-path <plugin.so>] \
     [--device-id <id0#id1#...>] [--perf <input_tokens> <output_tokens>] \
     [--dump-tensors <dir>]
 ```
@@ -469,6 +539,7 @@ adb push Qwen3.5-9B-llm_seg0.safetensors /data/models/multicard/
 | `--device-id STRING` | 设备 ID，可不设置；多卡推理时使用 `#` 分隔多个设备 ID | 自动分配 |
 | `--perf <input_tokens> <output_tokens>` | 启用性能测试模式，指定输入 token 总数和生成 token 总数 | 无 |
 | `--dump-tensors <dir>` | 保存 `embed_callback` 和 `input_callback` 的 tensor 二进制及元数据 | 无 |
+| `--custom-op-path <plugin.so>` | 自定义算子插件路径；程序会对每个 stage 的 RKNN context 分别调用 `rknn3_register_custom_ops_plugins` 注册 | 无；模型包含自定义算子时必填 |
 
 性能测试模式直接使用词表中的有效 token 构造 `input_tokens`，以获得精确输入长度且不受 prompt 大小影响。`output_tokens` 包含 prefill 产生的首 token，程序随后固定执行 `output_tokens - 1` 次 decode；测试期间忽略 EOS，并关闭生成文本打印。输入和 decode 输入占用的总长度必须满足 `input_tokens + output_tokens - 1 <= max_context_len`。
 

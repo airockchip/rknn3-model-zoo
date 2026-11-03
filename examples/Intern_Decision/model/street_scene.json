@@ -1,0 +1,22 @@
+{
+  "questions": {
+    "vehicle": {
+      "type": "choice",
+      "instructions": "图片中主要的大型车辆是什么？",
+      "criteria": {
+        "bus": "公交车或客车",
+        "train": "火车",
+        "boat": "船",
+        "other": "其他车辆或没有上述车辆"
+      }
+    },
+    "people": {
+      "type": "noul",
+      "instructions": "图片中是否有人？",
+      "criteria": {
+        "no": "没有人",
+        "yes": "有人"
+      }
+    }
+  }
+}

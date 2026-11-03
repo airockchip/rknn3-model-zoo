@@ -98,7 +98,9 @@ if __name__ == '__main__':
         device_map="cpu",
         max_inference_batch_size=1,
         max_new_tokens=128,
+        attn_implementation="eager",
     )
+    qwen3_asr_model.model.thinker.model.config._attn_implementation = "eager"
     kwargs = {
         'trust_remote_code': True,
     }

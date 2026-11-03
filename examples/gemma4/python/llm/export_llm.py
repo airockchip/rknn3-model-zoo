@@ -104,6 +104,7 @@ if __name__ == '__main__':
             _mapping._modules.pop('gemma4', None)
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)

@@ -23,8 +23,9 @@ parser.add_argument('--export_datapath', type=str, default='./quant_data/model_i
 args = parser.parse_args()
 
 ## 加载模型
+device = "cuda" if torch.cuda.is_available() else "cpu"
 model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    args.model_path, device_map="cpu", torch_dtype=torch.bfloat16,
+    args.model_path, device_map=device, torch_dtype=torch.bfloat16,
     trust_remote_code=True).eval()
 
 processor = AutoProcessor.from_pretrained(args.model_path)

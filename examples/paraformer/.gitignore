@@ -1,0 +1,9 @@
+model/*
+!model/asr_example.wav
+!model/asr_example_hotword.wav
+!model/hotwords.txt
+build/
+install/
+__pycache__/
+*.pyc
+tmp/

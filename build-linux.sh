@@ -3,8 +3,16 @@
 set -e
 
 echo "$0 $@"
-while getopts ":t:a:d:b:m:r:j" opt; do
+SPEEDUP_CMAKE_ARGS=(-UENABLE_SPEEDUP)
+while getopts ":t:a:d:b:m:r:j-:" opt; do
   case $opt in
+    -)
+      case "$OPTARG" in
+        enable_speedup) SPEEDUP_CMAKE_ARGS=(-DENABLE_SPEEDUP=ON) ;;
+        disable_speedup) SPEEDUP_CMAKE_ARGS=(-DENABLE_SPEEDUP=OFF) ;;
+        *) echo "Invalid option: --$OPTARG"; exit 1 ;;
+      esac
+      ;;
     t)
       TARGET_SOC=$OPTARG
       ;;
@@ -38,7 +46,7 @@ while getopts ":t:a:d:b:m:r:j" opt; do
 done
 
 if [ -z ${TARGET_SOC} ] || [ -z ${BUILD_DEMO_NAME} ]; then
-  echo "$0 -t <target> -a <arch> -d <build_demo_name> [-b <build_type>] [-m] [-r] [-j]"
+  echo "$0 -t <target> -a <arch> -d <build_demo_name> [-b <build_type>] [-m] [-r] [-j] [--enable_speedup|--disable_speedup]"
   echo ""
   echo "    -t : target (rk3588/rk3576/rk3572/x86)"
   echo "    -a : arch (aarch64/armhf/x86_64)"
@@ -47,6 +55,9 @@ if [ -z ${TARGET_SOC} ] || [ -z ${BUILD_DEMO_NAME} ]; then
   echo "    -m : enable address sanitizer, build_type need set to Debug"
   echo "    -r : disable rga, use cpu resize image"
   echo "    -j : disable libjpeg to avoid conflicts between libjpeg and opencv"
+  echo "    --enable_speedup : enable SpeedUP (library and header required)"
+  echo "    --disable_speedup : build without SpeedUP"
+  echo "    Without either flag, SpeedUP is disabled; available files only produce an enablement hint."
   echo "such as: $0 -t rk3588 -a aarch64 -d Qwen2_5_VL"
   echo "Note: 'if you want to use opencv to read or save jpg files, use the '-j' option to disable libjpeg"
   echo ""
@@ -189,6 +200,7 @@ if [ "${TARGET_SOC}" = "x86" ]; then
         -DENABLE_ASAN=${ENABLE_ASAN} \
         -DDISABLE_RGA=${DISABLE_RGA} \
         -DDISABLE_LIBJPEG=${DISABLE_LIBJPEG} \
+        "${SPEEDUP_CMAKE_ARGS[@]}" \
         -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}
 else
     cmake ../../${BUILD_DEMO_PATH} \
@@ -199,6 +211,7 @@ else
         -DENABLE_ASAN=${ENABLE_ASAN} \
         -DDISABLE_RGA=${DISABLE_RGA} \
         -DDISABLE_LIBJPEG=${DISABLE_LIBJPEG} \
+        "${SPEEDUP_CMAKE_ARGS[@]}" \
         -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}
 fi
 

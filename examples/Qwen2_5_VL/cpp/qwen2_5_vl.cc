@@ -30,6 +30,7 @@ static const SpeedUPConfig g_speedup_config = {
     .max_ratio = 0.8f,
     .stride = 16
 };
+
 #endif
 
 int init_internal_share(rknn_app_context_t* app_ctx, uint32_t core_mask_vision, uint32_t core_mask_llm)
@@ -203,22 +204,25 @@ int init_qwen2_5_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_pat
     app_ctx->base_callback = callback;
     app_ctx->speedup = speedup_create(&g_speedup_config);
     if (!app_ctx->speedup) {
-        printf("[SpeedUP] create failed during init\n");
-        release_qwen2_5_vl_llm(&(app_ctx->llm));
-        release_qwen2_5_vl_vision(&(app_ctx->vision));
-        return -1;
-    }
-    ret = speedup_attach_mrope_callback(app_ctx->speedup,
-                                             app_ctx->llm.rknn_ctx,
-                                             app_ctx->llm.rknn_sess,
-                                             &app_ctx->base_callback);
-    if (ret != 0) {
-        printf("[SpeedUP] attach persistent input_callback failed, ret=%d; fallback to normal inference without SpeedUP\n", ret);
-        speedup_destroy(app_ctx->speedup);
-        app_ctx->speedup = NULL;
+        printf("[SpeedUP] create failed; fallback to normal inference without SpeedUP\n");
     } else {
-        printf("[SpeedUP] persistent input_callback attached, version=%s\n",
-               speedup_get_version());
+        ret = speedup_attach_mrope_callback(app_ctx->speedup,
+                                           app_ctx->llm.rknn_ctx,
+                                           app_ctx->llm.rknn_sess,
+                                           &app_ctx->base_callback);
+        if (ret != 0) {
+            printf("[SpeedUP] initialization failed, ret=%d; fallback to normal inference without SpeedUP\n", ret);
+            ret = speedup_detach_mrope_callback(app_ctx->speedup, app_ctx->llm.rknn_sess);
+            if (ret != 0) {
+                printf("[SpeedUP] fallback failed! ret=%d; stop inference\n", ret);
+                return ret;
+            }
+            speedup_destroy(app_ctx->speedup);
+            app_ctx->speedup = NULL;
+        } else {
+            printf("[SpeedUP] ready, version=%s\n",
+                   speedup_get_version());
+        }
     }
 #endif
 
@@ -297,8 +301,14 @@ int inference_qwen2_5_vl_model(
                                                           app_ctx->llm.rknn_sess,
                                                           &output_count_per_input);
         if (ret != 0) {
-            printf("[SpeedUP] prepare failed! ret=%d\n", ret);
-            return ret;
+            printf("[SpeedUP] processing failed! ret=%d; fallback to normal inference without SpeedUP\n", ret);
+            ret = speedup_detach_mrope_callback(app_ctx->speedup, app_ctx->llm.rknn_sess);
+            if (ret != 0) {
+                printf("[SpeedUP] fallback failed! ret=%d; stop inference\n", ret);
+                return ret;
+            }
+            speedup_destroy(app_ctx->speedup);
+            app_ctx->speedup = NULL;
         }
     }
 #endif

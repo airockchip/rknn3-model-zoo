@@ -23,6 +23,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)

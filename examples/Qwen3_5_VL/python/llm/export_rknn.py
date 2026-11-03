@@ -1,23 +1,54 @@
 import numpy as np
 import os
+import sys
 from rknn.api import RKNN,DEFAULT_RKNN_LLM_CONFIG
 import onnx
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from lora_node_map import build_lora_node_map
 
-ONNX_MODEL = '../../model/llm/Qwen3.5-0.8B-llm.onnx'
-LLM_CONFIG = '../../model/llm/Qwen3.5-0.8B-llm.config.pkl'
-RKNN_MODEL = '../../model/llm/Qwen3.5-0.8B-llm.rknn'
+
+ONNX_MODEL = '../../model/llm/Qwen3.5-4B-llm.onnx'
+LORA_MODEL = None
+LORA_CONFIG = None
+LLM_CONFIG = '../../model/llm/Qwen3.5-4B-llm.config.pkl'
+RKNN_MODEL = '../../model/llm/Qwen3.5-4B-llm.rknn'
 
 if __name__ == '__main__':
 
     from argparse import ArgumentParser
     parser = ArgumentParser(description="Export Qwen/Qwen3_5 llm to RKNN model") 
     parser.add_argument("--onnx_path", type=str, help="onnx model path", required=False, default=ONNX_MODEL)
+    parser.add_argument("--lora_path", type=str, help="LoRA adapter safetensors path; omit to export Base only", default=LORA_MODEL)
+    parser.add_argument("--lora_config_path", type=str, help="LoRA adapter_config.json path", default=LORA_CONFIG)
     parser.add_argument("--config", type=str, help="config file path", required=False, default=LLM_CONFIG)
     parser.add_argument("--rknn_path", type=str, help="output rknn model path", required=False, default=RKNN_MODEL)
     parser.add_argument('--platform', type=str, default="rk1820", help='Target platform (e.g. rk1820)')
+    parser.add_argument("--hf_onnx_map", type=str, default=None,
+                        help="HF weight to ONNX op mapping; defaults to <onnx_path>.hf_onnx_map.json")
+    parser.add_argument("--lora_node_map_output", type=str, default=None,
+                        help="optional exact RKNN LoRA node map JSON output path")
+    parser.add_argument("--lora_node_map_report", type=str, default=None,
+                        help="optional LoRA node map report output path")
+    parser.add_argument("--lora_filtered_path", type=str, default=None,
+                        help="optional filtered LoRA safetensors output path")
     parser.add_argument('--rebuild', action='store_true', required=False, default=False, help='Whether to rebuild the model')
     args = parser.parse_args()
+
+    has_lora_args = args.lora_path is not None or args.lora_config_path is not None
+    if args.rebuild and has_lora_args:
+        raise ValueError('--rebuild cannot load a new LoRA; run a full export when LoRA is enabled')
+    if has_lora_args and (args.lora_path is None or args.lora_config_path is None):
+        raise ValueError('--lora_path and --lora_config_path must be provided together')
+    if has_lora_args:
+        if not os.path.isfile(args.lora_path):
+            raise FileNotFoundError(f'LoRA safetensors file not found: {args.lora_path}')
+        if not os.path.isfile(args.lora_config_path):
+            raise FileNotFoundError(f'LoRA config file not found: {args.lora_config_path}')
+
+    # The converter may create a temporary graph with conv_state_out removed;
+    # the HF/ONNX map still points to the original exported graph.
+    source_onnx_path = args.onnx_path
 
     rknn = RKNN(verbose=True)
 
@@ -95,6 +126,34 @@ if __name__ == '__main__':
         if ret != 0:
             print('Load model failed!')
             exit(ret)
+
+        if has_lora_args:
+            hf_onnx_map_path = args.hf_onnx_map or (os.path.splitext(source_onnx_path)[0] + '.hf_onnx_map.json')
+            rknn_stem = os.path.splitext(args.rknn_path)[0]
+            node_map_output = args.lora_node_map_output or (rknn_stem + '.lora_node_map.json')
+            node_map_report = args.lora_node_map_report or (rknn_stem + '.lora_node_map.report.json')
+            filtered_lora_path = args.lora_filtered_path or (rknn_stem + '.llm.safetensors')
+            print('--> Building exact LoRA node map')
+            lora_node_map, lora_load_path, _ = build_lora_node_map(
+                lora_path=args.lora_path,
+                hf_onnx_map_path=hf_onnx_map_path,
+                node_map_output=node_map_output,
+                report_output=node_map_report,
+                filtered_lora_output=filtered_lora_path,
+                scope="LLM",
+            )
+            ret = rknn.load_lora(
+                lora_paths=[[lora_load_path]],
+                lora_config_paths=[[args.lora_config_path]],
+                lora_patterns=[["lora0_pattern0"]],
+                lora_quantized_dtype="int4",
+                lora_quantized_method="group32",
+                lora_distribute_strategy="less_mem",
+                lora_node_map=lora_node_map,
+            )
+            if ret != 0:
+                print('Load LoRA failed!')
+                exit(ret)
         print('done')
 
         # Build model

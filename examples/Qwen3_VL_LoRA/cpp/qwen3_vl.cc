@@ -22,7 +22,6 @@
 #include "rknn3_api.h"
 #include "time_utils.h"
 
-
 int init_internal_share(rknn_app_context_t* app_ctx, uint32_t core_mask_vision, uint32_t core_mask_llm)
 {
     int ret = -1;
@@ -175,13 +174,13 @@ int release_internal_share(rknn_app_context_t* app_ctx)
 
 
 
-int init_qwen3_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_path, const char* llm_weight_path, const char* vision_model_path, const char* vision_weight_path, rknn3_llm_param* params, int n_params, RKLLMCallback& callback, uint32_t vision_core_mask, uint32_t llm_core_mask, int max_context_len1, int max_context_len2, char* lora_weight_path)
+int init_qwen3_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_path, const char* llm_weight_path, const char* vision_model_path, const char* vision_weight_path, rknn3_llm_param* params, int n_params, RKLLMCallback& callback, uint32_t vision_core_mask, uint32_t llm_core_mask, int max_context_len1, int max_context_len2, char* lora_weight_path, char* vision_lora_weight_path)
 {
     int ret = 0;
 
     printf("--> init qwen3_vl vision model\n");
     int deepstack_aligned_size;
-    ret = init_qwen3_vl_vision(&(app_ctx->vision), vision_model_path, vision_weight_path, vision_core_mask, &deepstack_aligned_size, app_ctx->model_width, app_ctx->model_height);
+    ret = init_qwen3_vl_vision(&(app_ctx->vision), vision_model_path, vision_weight_path, vision_core_mask, &deepstack_aligned_size, app_ctx->model_width, app_ctx->model_height, vision_lora_weight_path);
     if (ret < 0)
     {
         printf("rknn_init qwen3_vl vision model fail! ret=%d\n", ret);
@@ -204,6 +203,13 @@ int init_qwen3_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_path,
         return ret;
     }
 
+    // LoRA 加载放在内部内存配置完成之后：rknn3_lora_init 要求 model_init 之后调用，
+    // 而 rknn3_set_internal_mem 会重配 context 的内存布局，先加载会被这次重配冲掉。
+    if (vision_lora_weight_path != nullptr) {
+        printf("--> setup vision LoRA (after internal mem config)\n");
+        setup_qwen3_vl_vision_lora(&(app_ctx->vision), vision_lora_weight_path);
+    }
+
     return ret;
 }
 
@@ -215,22 +221,29 @@ int release_qwen3_vl_model(rknn_app_context_t* app_ctx)
     return 0;
 }
 
-int inference_qwen3_vl_model_vision(rknn_app_context_t* app_ctx, image_buffer_t* img, float16* img_embeds, rknn_perf_metrics_t* perf)
+int inference_qwen3_vl_model_vision(rknn_app_context_t* app_ctx, image_buffer_t* img, float16* img_embeds, rknn_perf_metrics_t* perf, bool use_lora)
 {
     if (!app_ctx || !img) {
         printf("app_ctx or img is NULL\n");
         return -1;
     }
-    printf("--> inference qwen3_vl vision model\n");
-    int start_us = getCurrentTimeUs();
+    printf("--> inference qwen3_vl vision model (%s)\n", use_lora ? "lora" : "base");
+    // base 输出写入 base deepstack，lora 输出写入 lora 专用 deepstack
+    rknn3_aux_tensor* deepstack = use_lora ? app_ctx->llm.deepstack_tensor_lora : app_ctx->llm.deepstack_tensor;
+    int64_t start_us = getCurrentTimeUs();
     int ret = inference_qwen3_vl_vision(&(app_ctx->vision), img, img_embeds,
-        (float16*)app_ctx->llm.deepstack_tensor[0].mem->virt_addr,
-        (float16*)app_ctx->llm.deepstack_tensor[1].mem->virt_addr,
-        (float16*)app_ctx->llm.deepstack_tensor[2].mem->virt_addr);
+        (float16*)deepstack[0].mem->virt_addr,
+        (float16*)deepstack[1].mem->virt_addr,
+        (float16*)deepstack[2].mem->virt_addr,
+        use_lora);
     perf->vision_latency = getCurrentTimeUs() - start_us;
     if (ret != 0) {
         printf("inference qwen3_vl vision model fail! ret=%d\n", ret);
         return ret;
+    }
+    if (use_lora) {
+        // 通知 LLM 的 lora session 使用带 LoRA 的 vision deepstack
+        app_ctx->llm.lora_deepstack_ready = true;
     }
     return 0;
 }

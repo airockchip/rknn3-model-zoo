@@ -250,7 +250,7 @@ int inference_functiongemma_llm(rknn_functiongemma_llm_context* llm_ctx, rknn3_l
     return ret;
   }
 
-  ret = rknn3_session_clear_kvcache(llm_ctx->rknn_sess, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT);
+  ret = rknn3_session_clear_kvcache(llm_ctx->rknn_sess, RKNN3_KVCACHE_KEEP_SYSTEM_PROMPT, nullptr);
   if (ret != RKNN3_SUCCESS) {
     printf("rknn3_session_clear_kvcache failed! ret=%d\n", ret);
     return ret;

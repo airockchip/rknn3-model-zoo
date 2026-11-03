@@ -739,6 +739,7 @@ def main():
         config=config,
         trust_remote_code=True,
         torch_dtype=torch_dtype,
+        attn_implementation="eager",
     )
     model.eval()
 

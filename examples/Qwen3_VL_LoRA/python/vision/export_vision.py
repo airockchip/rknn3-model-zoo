@@ -2,11 +2,14 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com/"
 import sys, torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from py_utils.export_llm_helper import update_config
 from py_utils.export_vision_helper import export_qwen2_vl_vision
 from py_utils.tools import clear_llm_external_weight_in_dir
 from transformers import AutoConfig, Qwen3VLForConditionalGeneration # transformers==4.57.0
+
+from lora_node_map import build_hf_onnx_mapping
 
 
 if __name__ == '__main__':
@@ -18,6 +21,12 @@ if __name__ == '__main__':
     parser.add_argument("--cali_dataset", default='./quant_data/model_inputs.json', help="some samples for grq quantized_algorithm")
     parser.add_argument("--export_vision_path", type=str, help="export vision onnx model path", required=False, default="Qwen3-VL-2B-vision.onnx")
     parser.add_argument("--modelscope", action='store_true', help="Whether download model from www.modelscope.cn")
+    parser.add_argument(
+        "--hf_onnx_map",
+        type=str,
+        default=None,
+        help="HF weight to ONNX op mapping output; defaults to <export_vision_path>.hf_onnx_map.json",
+    )
     parser.add_argument("--img_h", type=int, help="Input image size (e.g., 384, 416, 448). Must be a multiple of 32.", required=False, default=384)
     parser.add_argument("--img_w", type=int, help="Input image size (e.g., 384, 416, 448). Must be a multiple of 32.", required=False, default=384)
     
@@ -69,3 +78,17 @@ if __name__ == '__main__':
 
     # export vision model
     export_qwen2_vl_vision(model.visual, args, patch_size) # 添加grid_thw对输入图片的patch
+
+    # Keep the original HF names. LoRA keys are resolved against these names
+    # later, after export_rknn.py loads the generated mapping JSON. The vision
+    # tower lives under ``model.visual`` in the full state dict, so the prefix
+    # is added here to match the PEFT ``base_model.model.`` wrapper keys.
+    vision_state_dict = {
+        f"model.visual.{name}": value.detach().cpu()
+        for name, value in model.visual.state_dict().items()
+    }
+
+    hf_onnx_map_path = args.hf_onnx_map
+    if hf_onnx_map_path is None:
+        hf_onnx_map_path = os.path.splitext(args.export_vision_path)[0] + '.hf_onnx_map.json'
+    build_hf_onnx_mapping(args.export_vision_path, vision_state_dict, hf_onnx_map_path)

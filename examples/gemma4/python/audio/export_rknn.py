@@ -24,6 +24,7 @@ if __name__ == '__main__':
     parser.add_argument("--model_type", type=str, choices=['e2b', 'e4b'], default='e2b',
                         help="选择要导出的 Gemma-4 模型版本: e2b 或 e4b")
     parser.add_argument('--platform', type=str, default= "rk1820", help='Target platform (e.g. rk1820)')
+    parser.add_argument('--core_num', type=int, default=4, help='core_num')
     args = parser.parse_args()
 
     # 根据 model_type 选择对应配置
@@ -35,7 +36,7 @@ if __name__ == '__main__':
     rknn = RKNN(verbose=True)
 
     print('--> config model')
-    rknn.config(target_platform=args.platform, core_num=4,
+    rknn.config(target_platform=args.platform, core_num=args.core_num,
                 quantized_dtype='w8a16', quantized_algorithm='normal', quantized_method='group32',
                 profile_mode=False)
     print('done')

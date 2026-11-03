@@ -17,7 +17,9 @@
 -------------------------------------------*/
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <fcntl.h>
@@ -218,15 +220,164 @@ void printf_perf(rknn_perf_metrics_t *p)
     print_latency_fps("Vision", p->vision_latency);
 }
 
+static bool parse_model_dimension(const char* text, const char* name, uint32_t* value)
+{
+    if (!text || !value || text[0] == '\0' || text[0] == '-') {
+        printf("%s must be an integer in [0, UINT32_MAX]\n", name);
+        return false;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' || parsed > UINT32_MAX) {
+        printf("%s must be an integer in [0, UINT32_MAX]\n", name);
+        return false;
+    }
+
+    *value = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool parse_speedup_ratio(const char* text, float* value)
+{
+    if (!text || !value || text[0] == '\0') {
+        printf("speedup_ratio must be a number in [0, 1]\n");
+        return false;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    float parsed = strtof(text, &end);
+    if (errno != 0 || end == text || *end != '\0' ||
+        !std::isfinite(parsed) || parsed < 0.0f || parsed > 1.0f) {
+        printf("speedup_ratio must be a number in [0, 1]\n");
+        return false;
+    }
+
+    *value = parsed;
+    return true;
+}
+
+static void parse_lora_path(const char* value, const char** output)
+{
+    *output = (value && value[0] != '\0' && strcmp(value, "-") != 0)
+        ? value : nullptr;
+}
+
+static int parse_legacy_optional_args(int argc, char** argv,
+                                      uint32_t* model_width,
+                                      uint32_t* model_height,
+                                      float* speedup_ratio,
+                                      const char** llm_lora_weight_path,
+                                      const char** vision_lora_weight_path)
+{
+    int optional_count = argc - 11;
+    if (optional_count != 2 && optional_count != 3 &&
+        optional_count != 4 && optional_count != 5) {
+        printf("Legacy optional arguments must be: [model_width model_height] "
+               "[speedup_ratio] [llm_lora_weight_path] [vision_lora_weight_path]\n");
+        return -1;
+    }
+
+    if (!parse_model_dimension(argv[11], "model_width", model_width) ||
+        !parse_model_dimension(argv[12], "model_height", model_height)) {
+        return -1;
+    }
+    if (optional_count >= 3 &&
+        !parse_speedup_ratio(argv[13], speedup_ratio)) {
+        return -1;
+    }
+    if (optional_count >= 4) {
+        parse_lora_path(argv[14], llm_lora_weight_path);
+    }
+    if (optional_count >= 5) {
+        parse_lora_path(argv[15], vision_lora_weight_path);
+    }
+    return 0;
+}
+
+static bool is_named_option(const char* arg)
+{
+    return arg && arg[0] == '-' && arg[1] == '-';
+}
+
+static bool option_is(const char* arg, const char* a, const char* b = nullptr,
+                      const char* c = nullptr)
+{
+    return (arg && a && strcmp(arg, a) == 0) ||
+           (arg && b && strcmp(arg, b) == 0) ||
+           (arg && c && strcmp(arg, c) == 0);
+}
+
+static int parse_named_optional_args(int argc, char** argv,
+                                     uint32_t* model_width,
+                                     uint32_t* model_height,
+                                     float* speedup_ratio,
+                                     const char** llm_lora_weight_path,
+                                     const char** vision_lora_weight_path)
+{
+    for (int i = 11; i < argc; ++i) {
+        const char* option = argv[i];
+        if (strcmp(option, "--help") == 0 || strcmp(option, "-h") == 0) {
+            return 1;
+        }
+        if (!is_named_option(option)) {
+            printf("Named optional arguments cannot be mixed with legacy positional arguments: %s\n",
+                   option);
+            return -1;
+        }
+        if (i + 1 >= argc) {
+            printf("Missing value for option %s\n", option);
+            return -1;
+        }
+
+        const char* value = argv[++i];
+        if (option_is(option, "--model-width", "--model_width")) {
+            if (!parse_model_dimension(value, "model_width", model_width)) {
+                return -1;
+            }
+        } else if (option_is(option, "--model-height", "--model_height")) {
+            if (!parse_model_dimension(value, "model_height", model_height)) {
+                return -1;
+            }
+        } else if (option_is(option, "--speedup-ratio", "--speedup_ratio")) {
+            if (!parse_speedup_ratio(value, speedup_ratio)) {
+                return -1;
+            }
+        } else if (option_is(option, "--llm-lora", "--llm_lora_path", "--llm-lora-path")) {
+            parse_lora_path(value, llm_lora_weight_path);
+        } else if (option_is(option, "--vision-lora", "--vision_lora_path", "--vision-lora-path")) {
+            parse_lora_path(value, vision_lora_weight_path);
+        } else {
+            printf("Unknown option: %s\n", option);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void print_usage(const char* program)
+{
+    printf("%s <vision_model_path> <vision_weight_path> <llm_model_path> "
+           "<llm_weight_path> <tokenizer_path> <embedding_path> "
+           "<vision_core_mask> <llm_core_mask> <image_path> <prompt> "
+           "[model_width model_height] [speedup_ratio] "
+           "[llm_lora_weight_path] [vision_lora_weight_path]\n", program);
+    printf("  speedup_ratio: 1.0=Auto, 0.0=Disable, (0,1)=Manual (default: 1.0)\n");
+    printf("  LoRA paths are optional; use '-' for the adapter that is not enabled.\n");
+    printf("  Named options may be supplied independently, for example:\n");
+    printf("    --llm_lora_path <path> --vision_lora_path <path>\n");
+}
+
 
 /*-------------------------------------------
                   Main Function
 -------------------------------------------*/
 int main(int argc, char **argv)
 {
-    if (argc != 11 && argc != 13)
-    {
-        printf("%s <vision_model_path> <vision_weight_path> <llm_model_path> <llm_weight_path> <tokenizer_path> <embedding_path> <vision_core_mask> <llm_core_mask> <image_path> <prompt> <model_width> <model_height>\n", argv[0]);
+    if (argc < 11) {
+        print_usage(argv[0]);
         return -1;
     }
  
@@ -242,13 +393,38 @@ int main(int argc, char **argv)
     const char *prompt             = argv[10];
     uint32_t    model_width         = 0;
     uint32_t    model_height        = 0;
-    if (argc == 13) {
-        model_width  = strtoul(argv[11], nullptr, 0);
-        model_height = strtoul(argv[12], nullptr, 0);
+    float speedup_ratio = 1.0f;
+    const char* llm_lora_weight_path = nullptr;
+    const char* vision_lora_weight_path = nullptr;
+    if (argc > 11) {
+        bool has_named_option = false;
+        for (int i = 11; i < argc; ++i) {
+            if (is_named_option(argv[i])) {
+                has_named_option = true;
+                break;
+            }
+        }
+        int parse_ret = has_named_option
+            ? parse_named_optional_args(argc, argv, &model_width, &model_height,
+                                        &speedup_ratio, &llm_lora_weight_path,
+                                        &vision_lora_weight_path)
+            : parse_legacy_optional_args(argc, argv, &model_width, &model_height,
+                                         &speedup_ratio, &llm_lora_weight_path,
+                                         &vision_lora_weight_path);
+        if (parse_ret != 0) {
+            if (parse_ret > 0) {
+                print_usage(argv[0]);
+                return 0;
+            }
+            print_usage(argv[0]);
+            return -1;
+        }
     }
     std::string prompt_with_image;
 
     int ret = 0;
+    bool lora_requested = (llm_lora_weight_path != nullptr ||
+                           vision_lora_weight_path != nullptr);
     rknn_perf_metrics_t perf;
     memset(&perf, 0, sizeof(perf));
     first_token = 0;
@@ -284,6 +460,7 @@ int main(int argc, char **argv)
     // Image Embed
     size_t embed_elems = 1;
     std::unique_ptr<float16, free_deleter> img_embeds;
+    std::unique_ptr<float16, free_deleter> img_embeds_lora;
 
     // LLM Multi Model Tensor
     int n_inputs = 1;
@@ -382,7 +559,7 @@ int main(int argc, char **argv)
     callback.embed_callback     = embed_callback;
     callback.embed_userdata     = &embedding_info;
 
-    ret = init_qwen3_5_vl_model(&rknn_app_ctx, llm_model_path, llm_weight_path, vision_model_path, vision_weight_path, &params, n_params, &callback, vision_core_mask, llm_core_mask);
+    ret = init_qwen3_5_vl_model(&rknn_app_ctx, llm_model_path, llm_weight_path, vision_model_path, vision_weight_path, &params, n_params, &callback, vision_core_mask, llm_core_mask, vision_lora_weight_path);
     if (ret != 0)
     {
         printf("init_qwen3_5_vl_model fail! ret=%d llm_model_path=%s vision_model_path=%s\n", ret, llm_model_path, vision_model_path);
@@ -399,6 +576,16 @@ int main(int argc, char **argv)
         printf("malloc img_embeds fail!\n");
         ret = -1;
         goto out;
+    }
+    // A separate output buffer is required only when Vision LoRA is enabled;
+    // otherwise the LoRA LLM pass reuses the Base vision embedding.
+    if (vision_lora_weight_path != nullptr) {
+        img_embeds_lora.reset((float16*)malloc((embed_elems) * sizeof(float16)));
+        if (!img_embeds_lora) {
+            printf("malloc img_embeds_lora fail!\n");
+            ret = -1;
+            goto out;
+        }
     }
 
     // Read Image
@@ -429,14 +616,89 @@ int main(int argc, char **argv)
     tensor.image.image_content    = "<|image_pad|>";
     tensor.enable_thinking = false;
 
-    ret = inference_qwen3_5_vl_model(&rknn_app_ctx, &src_image, img_embeds.get(), tensor, n_inputs, &perf);
-    if (ret != 0)
-    {
-        printf("inference qwen3_5_vl model fail! ret=%d\n", ret);
-        goto out;
-    }
+    if (!lora_requested) {
+        ret = inference_qwen3_5_vl_model(&rknn_app_ctx, &src_image,
+                                         img_embeds.get(), tensor, n_inputs,
+                                         &perf, speedup_ratio);
+        if (ret != 0) {
+            printf("inference qwen3_5_vl model fail! ret=%d\n", ret);
+            goto out;
+        }
+        printf_perf(&perf);
+    } else {
+        rknn_perf_metrics_t perf_base;
+        rknn_perf_metrics_t perf_lora;
+        memset(&perf_base, 0, sizeof(perf_base));
+        memset(&perf_lora, 0, sizeof(perf_lora));
 
-    printf_perf(&perf);
+        printf("\n========== Base model ==========\n");
+        first_decode = true;
+        ret = inference_qwen3_5_vl_model_vision(&rknn_app_ctx, &src_image,
+                                                img_embeds.get(), &perf_base,
+                                                false);
+        if (ret != 0) {
+            printf("inference qwen3_5_vl vision (base) fail! ret=%d\n", ret);
+            goto out;
+        }
+        tensor.image.image_embed = img_embeds.get();
+        ret = inference_qwen3_5_vl_model_llm(&rknn_app_ctx, tensor, n_inputs,
+                                             &perf_base, false, speedup_ratio);
+        if (ret != 0) {
+            printf("inference qwen3_5_vl llm (base) fail! ret=%d\n", ret);
+            goto out;
+        }
+        printf_perf(&perf_base);
+
+        // Vision LoRA is context-level and can be toggled without recreating
+        // the Vision session. LLM LoRA uses a new session after Base ends.
+        if (vision_lora_weight_path != nullptr) {
+            first_decode = true;
+            ret = inference_qwen3_5_vl_model_vision(&rknn_app_ctx, &src_image,
+                                                    img_embeds_lora.get(),
+                                                    &perf_lora, true);
+            if (ret != 0) {
+                printf("inference qwen3_5_vl vision (lora) fail! ret=%d\n", ret);
+                goto out;
+            }
+        }
+
+        tensor.image.image_embed = vision_lora_weight_path != nullptr
+            ? img_embeds_lora.get() : img_embeds.get();
+        perf_lora.vision_latency = vision_lora_weight_path != nullptr
+            ? perf_lora.vision_latency : perf_base.vision_latency;
+
+        if (llm_lora_weight_path != nullptr) {
+            ret = prepare_qwen3_5_vl_lora_session(&rknn_app_ctx,
+                                                  llm_lora_weight_path);
+            if (ret != 0) {
+                printf("prepare qwen3_5_vl LoRA session fail! ret=%d\n", ret);
+                goto out;
+            }
+
+            printf("\n========== LoRA model (LLM%s) ==========\n",
+                   vision_lora_weight_path != nullptr ? "+Vision" : "");
+            first_decode = true;
+            ret = inference_qwen3_5_vl_model_llm(&rknn_app_ctx, tensor, n_inputs,
+                                                 &perf_lora, true, 0.0f);
+            if (ret != 0) {
+                printf("inference qwen3_5_vl llm (lora) fail! ret=%d\n", ret);
+                goto out;
+            }
+            printf_perf(&perf_lora);
+        } else if (vision_lora_weight_path != nullptr) {
+            // With only a Vision adapter, keep the Base LLM session and run a
+            // second pass using the Vision-LoRA embeddings.
+            printf("\n========== LoRA model (Vision only) ==========\n");
+            first_decode = true;
+            ret = inference_qwen3_5_vl_model_llm(&rknn_app_ctx, tensor, n_inputs,
+                                                 &perf_lora, false, 0.0f);
+            if (ret != 0) {
+                printf("inference qwen3_5_vl llm (vision lora) fail! ret=%d\n", ret);
+                goto out;
+            }
+            printf_perf(&perf_lora);
+        }
+    }
 out:
     int release_ret = release_qwen3_5_vl_model(&rknn_app_ctx);
 

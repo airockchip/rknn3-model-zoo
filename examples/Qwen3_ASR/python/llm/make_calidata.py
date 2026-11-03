@@ -42,6 +42,7 @@ if __name__ == '__main__':
         info.append({"sample":"model_inputs/{}".format(sample_name)})
         with open(pickle_path, 'wb') as f:
             pickle.dump(temp, f)
+        case_index += 1
 
     import random
     random.shuffle(info)

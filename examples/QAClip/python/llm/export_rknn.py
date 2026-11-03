@@ -1,41 +1,41 @@
 import numpy as np
 from rknn.api import RKNN
-from rknn.api import DEFAULT_RKNN_LLM_CONFIG
-
-import os
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com/"
 
 ONNX_MODEL = '../../models/chinese_clip_text.onnx'
-LLM_CONFIG = '../../models/chinese_clip_text.config.pkl'
 RKNN_MODEL = '../../rknn/chinese_clip_text.rknn'
-DATASET_PATH = '../../../datasets/dataset.txt'
 
-SEQ_LEN = 352
+# 多桶动态shape
+TEXT_BUCKETS = [
+    [[1, 128, 768], [1, 128], [1, 128]],
+    [[1, 256, 768], [1, 256], [1, 256]],
+    [[1, 352, 768], [1, 352], [1, 352]],
+]
+
 if __name__ == '__main__':
 
     from argparse import ArgumentParser
-    parser = ArgumentParser(description="Export chinese_clip_text to RKNN model") 
+    parser = ArgumentParser(description="Chinese clip text convert rknn")
     parser.add_argument("--onnx_path", type=str, help="onnx model path", required=False, default=ONNX_MODEL)
-    parser.add_argument("--config", type=str, help="config file path", required=False, default=LLM_CONFIG)
     parser.add_argument("--rknn_path", type=str, help="output rknn model path", required=False, default=RKNN_MODEL)
-    parser.add_argument("--dataset_path", type=str, help="model quantization dataset path", required=False, default=DATASET_PATH)
-    parser.add_argument('--platform', type=str, default= "rk1820", help='Target platform (e.g. rk1820)')
+    parser.add_argument('--platform', type=str, default="rk1820", help='Target platform (e.g. rk1820)')
     args = parser.parse_args()
 
-    llm_config = DEFAULT_RKNN_LLM_CONFIG.copy()
-    llm_config['attention_config'][0]['position_name'] = None
     # Create RKNN object
     rknn = RKNN(verbose=True)
 
-    # pre-process config
     print('--> config model')
-    rknn.config(target_platform=args.platform, llm_config=llm_config,dynamic_input = [[[1,SEQ_LEN],[1,SEQ_LEN],[1,SEQ_LEN]]],
-                quantized_dtype='w4a16', quantized_algorithm='normal', quantized_method='group32', core_num=1)
+    rknn.config(target_platform=args.platform, core_num=1,
+                quantized_dtype='w6a16', quantized_algorithm='normal', quantized_method='group32',
+                dynamic_input=TEXT_BUCKETS,
+                input_attrs={'input_embeds': {'dtype': 'float16'},
+                             'attention_mask': {'dtype': 'float16'},
+                             'position_ids': {'dtype': 'int32'}},
+                output_attrs={'output': {'dtype': 'float16'}})
     print('done')
 
-    # # # # Load model
+    # Load model
     print('--> Loading model')
-    ret = rknn.load_llm(model=args.onnx_path, config=args.config)
+    ret = rknn.load_onnx(model=args.onnx_path)
     if ret != 0:
         print('Load model failed!')
         exit(ret)
@@ -43,19 +43,18 @@ if __name__ == '__main__':
 
     # Build model
     print('--> Building model')
-    rknn.build(do_quantization=False, dataset=args.dataset_path)
+    ret = rknn.build(do_quantization=True)
     if ret != 0:
         print('Build model failed!')
         exit(ret)
     print('done')
 
-    #Export rknn model
-    print('--> Export RKNN model')
+    # Export rknn model
+    print('--> Export rknn model')
     ret = rknn.export_rknn(args.rknn_path)
     if ret != 0:
-        print('Export rknn failed!')
+        print('Export rknn model failed!')
         exit(ret)
     print('done')
 
     rknn.release()
-

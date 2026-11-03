@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <vector>
 #include <math.h>
 #include <sys/time.h>
 
@@ -51,6 +52,8 @@ static void dump_tensor_attr(rknn3_tensor_attr* attrs)
            rknn3_get_layout_string(attrs->layout), rknn3_get_type_string(attrs->dtype), 
            attrs->core_id, rknn3_get_qnt_type_string(attrs->qnt_type));
 }
+
+// 计算张量逻辑数据大小（基于 shape × dtype 元素大小，不包含对齐填充）
 
 int init_qaclipvit_embedding_model(const char *model_path, const char* weight_path,
                                  qaclipvit_text_context_t *app_ctx, uint32_t core_mask)
@@ -125,6 +128,27 @@ int init_qaclipvit_embedding_model(const char *model_path, const char* weight_pa
         dump_tensor_attr(&(input_attrs[i]));
     }
 
+    app_ctx->idx_input_embeds      = -1;
+    app_ctx->idx_attention_mask    = -1;
+    app_ctx->idx_position_ids      = -1;
+    for (int i = 0; i < io_num.n_input; i++) {
+        const char* name = input_attrs[i].name;
+        if (strcmp(name, "input_embeds") == 0) {
+            app_ctx->idx_input_embeds = i;
+        } else if (strcmp(name, "attention_mask") == 0) {
+            app_ctx->idx_attention_mask = i;
+        } else if (strcmp(name, "position_ids") == 0) {
+            app_ctx->idx_position_ids = i;
+        }
+    }
+    if (app_ctx->idx_input_embeds < 0 || app_ctx->idx_attention_mask < 0 ||
+        app_ctx->idx_position_ids < 0) {
+        printf("model is missing required inputs (input_embeds/attention_mask/position_ids)\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("plain mode: 3-input model (input_embeds/attention_mask/position_ids)\n");
+
     // Get Model Output Info
     output_attrs = (rknn3_tensor_attr*)malloc(io_num.n_output * sizeof(rknn3_tensor_attr));
     if (output_attrs == NULL) {
@@ -146,6 +170,67 @@ int init_qaclipvit_embedding_model(const char *model_path, const char* weight_pa
         dump_tensor_attr(&(output_attrs[i]));
     }
 
+    // 动态多桶：枚举各 shape，记录 shape_id 与该 shape 下输入/输出 attr（seq 取 input_embeds.shape[1]）
+    app_ctx->n_buckets = 0;
+    app_ctx->cur_bucket = 0;
+    rknn3_shape_config shape_config;
+    memset(&shape_config, 0, sizeof(shape_config));
+    ret = rknn3_query(ctx, RKNN3_QUERY_DYNAMIC_SHAPE_CONFIG, &shape_config, sizeof(shape_config));
+    if (ret < 0) {
+        // 模型退化为单桶（固定 shape）
+        printf("rknn3_query DYNAMIC_SHAPE_CONFIG fail! ret=%d, fallback to single shape\n", ret);
+        qaclipvit_text_bucket_t* b = &app_ctx->buckets[0];
+        b->shape_id = 0;
+        for (uint32_t i = 0; i < io_num.n_input; i++) {
+            memcpy(&b->in_attrs[i], &(input_attrs[i]), sizeof(rknn3_tensor_attr));
+        }
+        for (uint32_t i = 0; i < io_num.n_output; i++) {
+            memcpy(&b->out_attrs[i], &(output_attrs[i]), sizeof(rknn3_tensor_attr));
+        }
+        b->seq = (int)input_attrs[0].shape[1];
+        app_ctx->n_buckets = 1;
+        printf("text bucket[0]: shape_id=0 seq=%d (single shape fallback)\n", b->seq);
+    } else {
+        uint32_t n_shapes = shape_config.n_shapes;
+        if (n_shapes > MAX_TEXT_BUCKETS) n_shapes = MAX_TEXT_BUCKETS;
+        if (n_shapes == 0) n_shapes = 1;
+        for (uint32_t s = 0; s < n_shapes; s++) {
+            int32_t sid = (int32_t)s;
+            ret = rknn3_set_shape(ctx, sid);
+            if (ret < 0) {
+                printf("rknn3_set_shape[%u]=%d fail! ret=%d\n", s, sid, ret);
+                goto cleanup;
+            }
+            qaclipvit_text_bucket_t* b = &app_ctx->buckets[app_ctx->n_buckets];
+            b->shape_id = sid;
+            for (uint32_t i = 0; i < io_num.n_input; i++) {
+                b->in_attrs[i].index = i;
+                ret = rknn3_query(ctx, RKNN3_QUERY_INPUT_ATTR, &(b->in_attrs[i]), sizeof(rknn3_tensor_attr));
+                if (ret < 0) {
+                    printf("shape[%u] query input[%u] fail! ret=%d\n", s, i, ret);
+                    goto cleanup;
+                }
+            }
+            for (uint32_t i = 0; i < io_num.n_output; i++) {
+                b->out_attrs[i].index = i;
+                ret = rknn3_query(ctx, RKNN3_QUERY_OUTPUT_ATTR, &(b->out_attrs[i]), sizeof(rknn3_tensor_attr));
+                if (ret < 0) {
+                    printf("shape[%u] query output[%u] fail! ret=%d\n", s, i, ret);
+                    goto cleanup;
+                }
+            }
+            b->seq = (int)b->in_attrs[0].shape[1];
+            printf("text bucket[%d]: shape_id=%d seq=%d\n", app_ctx->n_buckets, sid, b->seq);
+            app_ctx->n_buckets++;
+        }
+        // 复位到 shape 0，后续推理时再按 token 数 set_shape
+        ret = rknn3_set_shape(ctx, app_ctx->buckets[0].shape_id);
+        if (ret < 0) {
+            printf("rknn3_set_shape(default) fail! ret=%d\n", ret);
+            goto cleanup;
+        }
+    }
+
     // Set to context
     app_ctx->inputs = (rknn3_tensor*)malloc(io_num.n_input * sizeof(rknn3_tensor));
     app_ctx->outputs = (rknn3_tensor*)malloc(io_num.n_output * sizeof(rknn3_tensor));
@@ -157,8 +242,15 @@ int init_qaclipvit_embedding_model(const char *model_path, const char* weight_pa
     memset(app_ctx->inputs, 0, io_num.n_input * sizeof(rknn3_tensor));
     memset(app_ctx->outputs, 0, io_num.n_output * sizeof(rknn3_tensor));
 
+    // 输入输出内存按各桶中最大 aligned_size 分配，保证切换任意桶后都能放下
     for (int i = 0; i < app_ctx->io_num.n_input; i++) {
-        app_ctx->inputs[i].mem = rknn3_create_mem(ctx, input_attrs[i].aligned_size,
+        size_t max_size = input_attrs[i].aligned_size;
+        for (int b = 0; b < app_ctx->n_buckets; b++) {
+            if (app_ctx->buckets[b].in_attrs[i].aligned_size > max_size) {
+                max_size = app_ctx->buckets[b].in_attrs[i].aligned_size;
+            }
+        }
+        app_ctx->inputs[i].mem = rknn3_create_mem(ctx, max_size,
                                                  input_attrs[i].core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
         if (app_ctx->inputs[i].mem == NULL) {
             printf("rknn3_create_mem input[%d] failed!\n", i);
@@ -175,7 +267,13 @@ int init_qaclipvit_embedding_model(const char *model_path, const char* weight_pa
         memcpy(app_ctx->inputs[i].attr, &(input_attrs[i]), sizeof(rknn3_tensor_attr));
     }
     for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        app_ctx->outputs[i].mem = rknn3_create_mem(ctx, output_attrs[i].aligned_size,
+        size_t max_size = output_attrs[i].aligned_size;
+        for (int b = 0; b < app_ctx->n_buckets; b++) {
+            if (app_ctx->buckets[b].out_attrs[i].aligned_size > max_size) {
+                max_size = app_ctx->buckets[b].out_attrs[i].aligned_size;
+            }
+        }
+        app_ctx->outputs[i].mem = rknn3_create_mem(ctx, max_size,
                                                   output_attrs[i].core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
         if (app_ctx->outputs[i].mem == NULL) {
             printf("rknn3_create_mem output[%d] failed!\n", i);
@@ -190,7 +288,6 @@ int init_qaclipvit_embedding_model(const char *model_path, const char* weight_pa
             goto cleanup;
         }
         memcpy(app_ctx->outputs[i].attr, &(output_attrs[i]), sizeof(rknn3_tensor_attr));
-        // app_ctx->outputs[i].attr->dtype = RKNN3_TENSOR_FLOAT16;
     }
 
     printf("MetaCLIP2 embedding model initialized successfully\n");
@@ -261,48 +358,25 @@ int set_qaclipvit_input_data(qaclipvit_text_context_t *app_ctx,
         return -1;
     }
 
-    // 设置input_embeds [1, 77, EMBEDDING_DIM] FP16
-    if (input_data->input_embeds) {
-        size_t data_size = get_tensor_data_size(app_ctx->inputs[0].attr);
-        memcpy(app_ctx->inputs[0].mem->virt_addr, input_data->input_embeds, data_size);
+    // 设置input_embeds [1, seq, EMBEDDING_DIM] FP16
+    if (input_data->input_embeds && app_ctx->idx_input_embeds >= 0) {
+        size_t data_size = get_tensor_data_size(app_ctx->inputs[app_ctx->idx_input_embeds].attr);
+        memcpy(app_ctx->inputs[app_ctx->idx_input_embeds].mem->virt_addr,
+               input_data->input_embeds, data_size);
     }
 
-    // 设置attention_mask [1, 77] FP16
-    if (input_data->attention_mask) {
-        size_t data_size = get_tensor_data_size(app_ctx->inputs[1].attr);
-        memcpy(app_ctx->inputs[1].mem->virt_addr, input_data->attention_mask, data_size);
+    // 设置attention_mask [1, seq] FP16
+    if (input_data->attention_mask && app_ctx->idx_attention_mask >= 0) {
+        size_t data_size = get_tensor_data_size(app_ctx->inputs[app_ctx->idx_attention_mask].attr);
+        memcpy(app_ctx->inputs[app_ctx->idx_attention_mask].mem->virt_addr,
+               input_data->attention_mask, data_size);
     }
 
-    // 设置position_ids [1, MAX_SEQ_LEN] INT32
-    if (input_data->position_ids) {
-        size_t data_size = get_tensor_data_size(app_ctx->inputs[2].attr);
-        memcpy(app_ctx->inputs[2].mem->virt_addr, input_data->position_ids, data_size);
-    }
-
-    // 设置Th, Tc, Ts, Tsr [1] INT32
-    if (input_data->Th) {
-        ((int*)(app_ctx->inputs[3].mem->virt_addr))[0] = ((int*)input_data->Th)[0];
-        printf("Setting Th input is %d\n", ((int*)input_data->Th)[0]);
-        // memcpy(app_ctx->inputs[4].mem->virt_addr, input_data->Th, 
-        //        app_ctx->inputs[4].attr->aligned_size);
-    }
-    if (input_data->Tc) {
-        ((int*)(app_ctx->inputs[4].mem->virt_addr))[0] = ((int*)input_data->Tc)[0];
-        // printf("Setting Tc input is %d\n", ((int*)input_data->Tc)[0]);
-        // memcpy(app_ctx->inputs[5].mem->virt_addr, input_data->Tc, 
-        //        app_ctx->inputs[5].attr->aligned_size);
-    }
-    if (input_data->Ts) {
-        ((int*)(app_ctx->inputs[5].mem->virt_addr))[0] = ((int*)input_data->Ts)[0];
-        printf("Setting Ts input is %d\n", ((int*)input_data->Ts)[0]);
-        // memcpy(app_ctx->inputs[6].mem->virt_addr, input_data->Ts, 
-        //        app_ctx->inputs[6].attr->aligned_size);
-    }
-    if (input_data->Tsr) {
-        ((int*)(app_ctx->inputs[6].mem->virt_addr))[0] = ((int*)input_data->Tsr)[0];
-        printf("Setting Tsr input is %d\n", ((int*)input_data->Tsr)[0]);
-        // memcpy(app_ctx->inputs[7].mem->virt_addr, input_data->Tsr, 
-        //        app_ctx->inputs[7].attr->aligned_size);
+    // 设置position_ids [1, seq] INT32
+    if (input_data->position_ids && app_ctx->idx_position_ids >= 0) {
+        size_t data_size = get_tensor_data_size(app_ctx->inputs[app_ctx->idx_position_ids].attr);
+        memcpy(app_ctx->inputs[app_ctx->idx_position_ids].mem->virt_addr,
+               input_data->position_ids, data_size);
     }
 
     return 0;
@@ -331,6 +405,31 @@ int process_qaclipvit_output(qaclipvit_text_context_t *app_ctx,
     return 0;
 }
 
+// 按有效 token 数选最小的能装下的桶
+int select_qaclipvit_text_bucket(qaclipvit_text_context_t *app_ctx, int ntok)
+{
+    if (!app_ctx || app_ctx->n_buckets <= 0 || ntok <= 0) {
+        return -1;
+    }
+    int best = -1;
+    int best_seq = (1 << 30);
+    for (int i = 0; i < app_ctx->n_buckets; i++) {
+        if (app_ctx->buckets[i].seq >= ntok && app_ctx->buckets[i].seq < best_seq) {
+            best = i;
+            best_seq = app_ctx->buckets[i].seq;
+        }
+    }
+    if (best < 0) {
+        best = 0;
+        for (int i = 1; i < app_ctx->n_buckets; i++) {
+            if (app_ctx->buckets[i].seq > app_ctx->buckets[best].seq) {
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 int inference_qaclipvit_embedding_model(qaclipvit_text_context_t *app_ctx, 
                                       qaclipvit_input_data_t *input_data, 
                                       qaclipvit_result_t *result)
@@ -343,6 +442,33 @@ int inference_qaclipvit_embedding_model(qaclipvit_text_context_t *app_ctx,
 
     if ((!app_ctx) || (!input_data) || (!result)) {
         return -1;
+    }
+    if (input_data->ntok <= 0) {
+        printf("input_data->ntok invalid!\n");
+        return -1;
+    }
+
+    // 按 token 数选桶并切换 shape
+    int bucket_idx = select_qaclipvit_text_bucket(app_ctx, input_data->ntok);
+    if (bucket_idx < 0) {
+        printf("select text bucket fail for ntok=%d\n", input_data->ntok);
+        return -1;
+    }
+    app_ctx->cur_bucket = bucket_idx;
+    qaclipvit_text_bucket_t* bucket = &app_ctx->buckets[bucket_idx];
+    printf("text bucket: seq=%d (ntok=%d)\n", bucket->seq, input_data->ntok);
+    ret = rknn3_set_shape(app_ctx->rknn_ctx, bucket->shape_id);
+    if (ret < 0) {
+        printf("rknn3_set_shape fail! ret=%d\n", ret);
+        return ret;
+    }
+    // 把当前桶的输入输出 attr 拷入 inputs/outputs[i].attr（只改内容不改指针，
+    // release 时才能对自己的 malloc 内存正确 free）
+    for (int i = 0; i < app_ctx->io_num.n_input; i++) {
+        memcpy(app_ctx->inputs[i].attr, &bucket->in_attrs[i], sizeof(rknn3_tensor_attr));
+    }
+    for (int i = 0; i < app_ctx->io_num.n_output; i++) {
+        memcpy(app_ctx->outputs[i].attr, &bucket->out_attrs[i], sizeof(rknn3_tensor_attr));
     }
 
     memset(result, 0, sizeof(qaclipvit_result_t));

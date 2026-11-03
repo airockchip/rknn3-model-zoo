@@ -75,6 +75,9 @@ def make_llm_config():
     llm_config = copy.deepcopy(DEFAULT_RKNN_LLM_CONFIG)
     llm_config["attention_config"][0]["position_name"] = None
     llm_config["keep_one_logit"] = []
+    # Keep the projection in FP16. The toolkit default may otherwise select a
+    # weight-only LLM-head quantization policy.
+    llm_config["llm_head"] = []
     return llm_config
 
 
@@ -88,8 +91,7 @@ def export_encoder(args):
         print("--> Config encoder")
         config_kwargs = {
             "target_platform": args.target_platform,
-            "quantized_dtype": "w16a16",
-            "core_num": 8,
+            "core_num": 1 if args.target_platform == "rk3572" else 8,
         }
 
         rknn.config(**config_kwargs)
@@ -120,10 +122,7 @@ def export_decode0(args):
         print("--> Config decode0")
         config_kwargs = {
             "target_platform": args.target_platform,
-            "quantized_dtype": "w8a8",
-            "quantized_algorithm": "normal",
-            "quantized_method": "layer",
-            "core_num": 8,
+            "core_num": 1 if args.target_platform == "rk3572" else 8,
         }
 
         rknn.config(**config_kwargs)
@@ -163,9 +162,7 @@ def export_decode1(args):
         print("--> Config decode1 load_llm")
         config_kwargs = {
             "target_platform": args.target_platform,
-            "quantized_dtype": "w4a16",
-            "quantized_algorithm": "normal",
-            "quantized_method": "group32",
+            "core_num": 1 if args.target_platform == "rk3572" else 8,
             "llm_config": make_llm_config(),
             "dynamic_input": dynamic_input,
         }

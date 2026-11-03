@@ -34,9 +34,7 @@ if __name__ == '__main__':
     # 关闭 InternViT 的 flash_attn, 量化阶段改用 naive attention, 避免 dtype 冲突。
     update_config(config, ['use_flash_attn'], False)
     model = AutoModel.from_pretrained(args.model_path, **kwargs).eval()
-    # from_pretrained 会重新从磁盘读取 vision_config, 覆盖上面设置的 use_flash_attn=False,
-    # 故在模型加载后强制关闭 InternViT 各 attn 层的 use_flash_attn, 改用 naive attention,
-    # 避免量化阶段 flash_attn 的 fp16/bf16 assert 与 autoround 的 fp32 中间张量冲突。
+    # Also disable custom InternViT attention flags before export.
     for _name, _mod in model.vision_model.named_modules():
         if hasattr(_mod, 'use_flash_attn'):
             _mod.use_flash_attn = False

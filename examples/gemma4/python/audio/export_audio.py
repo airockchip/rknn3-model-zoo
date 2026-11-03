@@ -5,7 +5,10 @@ import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')))
 
 from py_utils.tools import clear_llm_external_weight_in_dir
-from py_utils.export_vision_helper import export_gemma4_audio
+from py_utils.export_vision_helper import (
+    export_gemma4_audio,
+    export_gemma4_audio_streaming,
+)
 from transformers import AutoModelForCausalLM, AutoConfig
 
 # Get the custom module path
@@ -33,6 +36,7 @@ if __name__ == '__main__':
     parser.add_argument("--model_path", type=str, help="model path or name", required=False, default="google/gemma-4-E2B-it")
     parser.add_argument("--export_audio_path", type=str, help="export audio onnx model path", required=False, default="../../model/audio/gemma-4-e2b-it-audio.onnx")
     parser.add_argument("--modelscope", action='store_true', help="Whether download model from www.modelscope.cn")
+    parser.add_argument("--streaming", action='store_true', help="Export the stateful Audio streaming graph")
     
     args = parser.parse_args()
 
@@ -44,6 +48,7 @@ if __name__ == '__main__':
         args.model_path = snapshot_download(args.model_path)
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
         'torch_dtype': torch.float32,
     }
@@ -60,7 +65,10 @@ if __name__ == '__main__':
         os.makedirs(export_audio_dirname)
 
     # export audio model
-    export_gemma4_audio(model, args)
+    if args.streaming:
+        export_gemma4_audio_streaming(model, args)
+    else:
+        export_gemma4_audio(model, args)
 
     if not args.load_weight:
         clear_llm_external_weight_in_dir(export_audio_dirname)

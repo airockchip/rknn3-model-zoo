@@ -1080,8 +1080,18 @@ class TextModel(ModelBase):
         if chkhsh == "d30d75d9059f1aa2c19359de71047b3ae408c70875e8a3ccf8c5fba56c9d8af4":
             # ref: https://huggingface.co/Qwen/Qwen3.5-9B-Instruct
             res = "qwen35"
+        if chkhsh == "5487aa6b6d0878852c79e0742dfc188f2abaa7711fe7f48469fd28e5a0573afb":
+            # ref: https://huggingface.co/tencent/WeMM-Embedding-2B
+            res = "qwen35"
         if chkhsh == "36f3066e97b7f3994b379aaacde306c1444c6ae84e81a5ae3cd2b7ed3b8c42d4":
             # ref: https://huggingface.co/openbmb/MiniCPM5-1B
+            res = "minicpm5"
+        if chkhsh == "2360c4549c2e7b27e6a2a0a8414392a41e370e0d398037a67c71850a515b0e4e":
+            # MiniCPM5 MoE uses the same Split and ByteLevel pre-tokenizer
+            # pattern as MiniCPM5-1B, but has a different vocabulary.
+            res = "minicpm5"
+        if chkhsh == "dfd2ce1b907415e864511d6e70291f8a098a7bef9519a5fafb3ae4f79ae377f0":
+            # ref: https://huggingface.co/openbmb/MiniCPM5-15B-A2.5B
             res = "minicpm5"
 
         if res is None:
@@ -2210,6 +2220,7 @@ class StableLMModel(TextModel):
     "LlamaModel",
     "MultiModalityCausalLM", # RKLLM: For Janus Pro
     "MiniCPMV",
+    "MiniCPMV4_7ForConditionalGeneration",
     )
 class LlamaModel(TextModel):
     model_arch = gguf.MODEL_ARCH.LLAMA
@@ -3102,6 +3113,20 @@ class DbrxModel(TextModel):
         return n_dims > 1
 
 
+@ModelBase.register("MiniCPM5MoEForCausalLM")
+class MiniCPM5MoEVocabModel(TextModel):
+    """MiniCPM5 MoE vocabulary export; GGUF weight conversion is unsupported."""
+    model_arch = gguf.MODEL_ARCH.MINICPM
+
+    def set_vocab(self):
+        self._set_vocab_gpt2()
+
+    def write(self):
+        raise NotImplementedError(
+            "MiniCPM5MoEForCausalLM supports --vocab-only only"
+        )
+
+
 @ModelBase.register("MiniCPMForCausalLM")
 class MiniCPMModel(TextModel):
     model_arch = gguf.MODEL_ARCH.MINICPM
@@ -3280,6 +3305,18 @@ class Qwen2Model(TextModel):
                 or name.startswith("vision_model") or name.startswith("audio_tower") \
                 or name.startswith("model.vision_tower") or name.startswith("model.multi_modal_projector"):
             # skip vision and audio tensors
+            return []
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("DotsOCRForCausalLM")
+class DotsOCRModel(Qwen2Model):
+    """dots.ocr / dots.mocr (Qwen2-based VLM): Qwen2 vocab/params, skip vision tower tensors."""
+    model_arch = gguf.MODEL_ARCH.QWEN2
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name.startswith("vision_tower") or name.startswith("model.vision_tower") \
+                or name.startswith("mlp") or name.startswith("multi_modal_projector"):
             return []
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -4126,7 +4163,7 @@ class Qwen2MoeModel(TextModel):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
-@ModelBase.register("Qwen3ForCausalLM")
+@ModelBase.register("Qwen3ForCausalLM", "HunYuanVLForConditionalGeneration")
 class Qwen3Model(Qwen2Model):
     model_arch = gguf.MODEL_ARCH.QWEN3
 
@@ -4209,6 +4246,20 @@ class Qwen3Model(Qwen2Model):
         return super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("Spark2_5ForCausalLM")
+class Spark2_5Model(Qwen3Model):
+    model_arch = gguf.MODEL_ARCH.QWEN3
+
+    def get_vocab_base_pre(self, tokenizer) -> str:
+        # Spark-X2.5 uses a Qwen2-family BPE tokenizer (131072 vocab)
+        return "qwen2"
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Spark-specific tensors (e.g. g_proj) have no GGUF mapping; this converter
+        # is only used with --vocab-only, so skip weight tensors entirely.
+        return []
+
+
 @ModelBase.register("Qwen3MoeForCausalLM")
 class Qwen3MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
@@ -4288,11 +4339,32 @@ class Qwen3_5TextModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN35
 
 
-@ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
+# MiniCPM-V 4.7 stores its text model in a Qwen3.5-MoE-compatible
+# text_config and uses the same GPT2/BPE tokenizer format. The alias is
+# needed for --vocab-only conversion; full multimodal model conversion still
+# requires a dedicated MiniCPM-V converter.
+@ModelBase.register(
+    "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5MoeForCausalLM",
+    "MiniCPMV4_7ForConditionalGeneration",
+)
 class Qwen3_5MoeTextModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 
+@ModelBase.register("Qwen3OmniNextForConditionalGeneration")
+class Qwen3_5OmniTextModel(Qwen2MoeModel):
+    model_arch = gguf.MODEL_ARCH.QWEN35
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Qwen3.5-Omni stores the text model under the "thinker." prefix; other
+        # sub-models (audio/visual/talker/code2wav) belong to other export files.
+        if name.startswith("thinker."):
+            name = name.replace("thinker.", "")
+        if name.startswith("audio_tower") or name.startswith("visual") or \
+                name.startswith("talker") or name.startswith("code2wav"):
+            return []
+        return [(self.map_tensor_name(name), data_torch)]
 
 
 @ModelBase.register("GPT2LMHeadModel")
@@ -9481,12 +9553,17 @@ class LFM2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.LFM2
 
     def _add_feed_forward_length(self):
-        ff_dim = self.hparams["block_ff_dim"]
+        # NOTE: LFM2 text models carry the MLP dim under "block_ff_dim", while
+        # LFM2.5-VL (and other newer multi-modal variants) do NOT have the
+        # block_* keys and expose a standard "intermediate_size" instead.
+        ff_dim = self.hparams.get("block_ff_dim")
+        auto_adjust_ff_dim = self.hparams.get("block_auto_adjust_ff_dim", False)
+        ffn_dim_multiplier = self.hparams.get("block_ffn_dim_multiplier")
+        multiple_of = self.hparams.get("block_multiple_of")
 
-        auto_adjust_ff_dim = self.hparams["block_auto_adjust_ff_dim"]
-        ff_dim = self.hparams["block_ff_dim"]
-        ffn_dim_multiplier = self.hparams["block_ffn_dim_multiplier"]
-        multiple_of = self.hparams["block_multiple_of"]
+        if ff_dim is None:
+            ff_dim = self.hparams["intermediate_size"]
+            auto_adjust_ff_dim = False
 
         if auto_adjust_ff_dim:
             ff_dim = int(2 * ff_dim / 3)

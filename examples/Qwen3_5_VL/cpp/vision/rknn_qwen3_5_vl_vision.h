@@ -35,12 +35,20 @@ typedef struct {
     uint32_t* embeds_shape;
     uint32_t embeds_ndims;
     int pruned_version_flag;
+
+    rknn3_lora lora;
+    bool       lora_loaded;
+    bool       lora_enabled;
 } rknn_qwen3_5_vl_vision_context;
 
 int init_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, const char* model_path, const char* weight_path, uint32_t core_mask, uint32_t model_width, uint32_t model_height);
 
+// Called after shared internal memory is configured. It loads the adapter but
+// leaves it disabled so the first vision inference remains the Base pass.
+int setup_qwen3_5_vl_vision_lora(rknn_qwen3_5_vl_vision_context* vision_ctx, const char* lora_weight_path);
+
 int release_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx);
 
-int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds);
+int inference_qwen3_5_vl_vision(rknn_qwen3_5_vl_vision_context* vision_ctx, image_buffer_t* img, float16* img_embeds, bool use_lora = false);
 
 #endif //_RKNN_DEMO_QWEN3_5_VL_VISION_UTILS_H_

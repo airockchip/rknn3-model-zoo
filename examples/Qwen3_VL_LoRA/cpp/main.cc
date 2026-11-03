@@ -185,9 +185,9 @@ void printf_perf(rknn_perf_metrics_t *p)
 -------------------------------------------*/
 int main(int argc, char **argv)
 {
-    if (argc != 15 && argc != 16)
+    if (argc != 15 && argc != 16 && argc != 17)
     {
-        printf("%s <vision_model_path> <vision_weight_path> <llm_model_path> <llm_weight_path> <tokenizer_path> <embedding_path> <vision_core_mask> <llm_core_mask> <image_path> <prompt> <model_width> <model_height> <max_context_len1> <max_context_len2> [llm_lora_weight_path]\n", argv[0]);
+        printf("%s <vision_model_path> <vision_weight_path> <llm_model_path> <llm_weight_path> <tokenizer_path> <embedding_path> <vision_core_mask> <llm_core_mask> <image_path> <prompt> <model_width> <model_height> <max_context_len1> <max_context_len2> [llm_lora_weight_path] [vision_lora_weight_path]\n", argv[0]);
         return -1;
     }
 
@@ -198,6 +198,7 @@ int main(int argc, char **argv)
     const char *tokenizer_path     = argv[5];
     const char *embedding_path     = argv[6];
     char *llm_lora_weight_path     = nullptr;
+    char *vision_lora_weight_path  = nullptr;
     uint32_t    vision_core_mask   = strtoul(argv[7], nullptr, 16);
     uint32_t    llm_core_mask      = strtoul(argv[8], nullptr, 16);
     const char *img_path           = argv[9];
@@ -214,8 +215,12 @@ int main(int argc, char **argv)
         printf("max_context_len1 and max_context_len2 are required and must be > 0.\n");
         return -1;
     }
-    if (argc == 16) {
+    // "-" 或空串表示该段不使用 LoRA，便于只传 vision LoRA 权重
+    if (argc >= 16 && argv[15][0] != '\0' && strcmp(argv[15], "-") != 0) {
         llm_lora_weight_path = argv[15];
+    }
+    if (argc == 17 && argv[16][0] != '\0' && strcmp(argv[16], "-") != 0) {
+        vision_lora_weight_path = argv[16];
     }
     std::string prompt_with_image;
 
@@ -223,6 +228,8 @@ int main(int argc, char **argv)
     rknn_perf_metrics_t perf;
     rknn_perf_metrics_t perf_base;
     rknn_perf_metrics_t perf_lora;
+    float vision_base_latency = 0.0f;
+    float vision_lora_latency = 0.0f;
 
     // RKNN Context
     rknn_app_context_t rknn_app_ctx;
@@ -250,7 +257,8 @@ int main(int argc, char **argv)
 
     // Image Embed
     size_t embed_elems = 1;
-    float16* img_embeds;
+    float16* img_embeds      = nullptr; // base vision 输出
+    float16* img_embeds_lora = nullptr; // 带 LoRA 的 vision 输出
 
     // LLM Multi Model Tensor
     int n_inputs = 4;
@@ -314,7 +322,7 @@ int main(int argc, char **argv)
     callback.embed_callback     = embed_callback;
     callback.embed_userdata     = &embedding_info;
 
-    ret = init_qwen3_vl_model(&rknn_app_ctx, llm_model_path, llm_weight_path, vision_model_path, vision_weight_path, &params, n_params, callback, vision_core_mask, llm_core_mask, max_context_len1, max_context_len2, llm_lora_weight_path);
+    ret = init_qwen3_vl_model(&rknn_app_ctx, llm_model_path, llm_weight_path, vision_model_path, vision_weight_path, &params, n_params, callback, vision_core_mask, llm_core_mask, max_context_len1, max_context_len2, llm_lora_weight_path, vision_lora_weight_path);
     if (ret != 0)
     {
         printf("init_qwen3_vl_model fail! ret=%d llm_model_path=%s vision_model_path=%s\n", ret, llm_model_path, vision_model_path);
@@ -327,6 +335,22 @@ int main(int argc, char **argv)
       embed_elems *= rknn_app_ctx.vision.embeds_shape[i];
     }
     img_embeds = (float16*)malloc((embed_elems) * sizeof(float16));
+    if (img_embeds == NULL)
+    {
+        printf("malloc image embed buffer fail!\n");
+        goto out;
+    }
+    // 未提供 vision LoRA 权重时，LoRA 段复用 base vision 的 embedding
+    img_embeds_lora = img_embeds;
+    if (vision_lora_weight_path != nullptr)
+    {
+        img_embeds_lora = (float16*)malloc((embed_elems) * sizeof(float16));
+        if (img_embeds_lora == NULL)
+        {
+            printf("malloc lora image embed buffer fail!\n");
+            goto out;
+        }
+    }
 
     // Read Image
     ret = read_image(img_path, &src_image);
@@ -356,17 +380,32 @@ int main(int argc, char **argv)
     tensor.image.image_content = "<|image_pad|>";
     tensor.enable_thinking     = false;
 
-    // Vision 跑一次，deepstack 供 base / lora 两段 LLM 共用
-    ret = inference_qwen3_vl_model_vision(&rknn_app_ctx, &src_image, img_embeds, &perf);
+    // Vision 第一段：base（不启用 LoRA），deepstack 写入 base 缓冲区
+    ret = inference_qwen3_vl_model_vision(&rknn_app_ctx, &src_image, img_embeds, &perf, false);
     if (ret != 0) {
-        printf("inference qwen3_vl vision fail! ret=%d\n", ret);
+        printf("inference qwen3_vl vision (base) fail! ret=%d\n", ret);
         goto out;
+    }
+    vision_base_latency = perf.vision_latency;
+
+    // Vision 第二段：带 LoRA（仅在提供 vision LoRA 权重时执行），deepstack 写入 lora 缓冲区
+    vision_lora_latency = vision_base_latency;
+    if (vision_lora_weight_path != nullptr) {
+        rknn_perf_metrics_t perf_vision_lora = perf;
+        ret = inference_qwen3_vl_model_vision(&rknn_app_ctx, &src_image, img_embeds_lora, &perf_vision_lora, true);
+        if (ret != 0) {
+            printf("inference qwen3_vl vision (lora) fail! ret=%d\n", ret);
+            goto out;
+        }
+        vision_lora_latency = perf_vision_lora.vision_latency;
     }
 
     // 第一段：Base 模型推理
     printf("\n========== Base model ==========\n");
     first_decode = true;
+    tensor.image.image_embed = img_embeds;
     perf_base = perf;
+    perf_base.vision_latency = vision_base_latency;
     ret = inference_qwen3_vl_llm_base(&(rknn_app_ctx.llm), tensor, n_inputs, &perf_base);
     if (ret != 0) {
         printf("inference qwen3_vl llm (base) fail! ret=%d\n", ret);
@@ -375,15 +414,29 @@ int main(int argc, char **argv)
     printf_perf(&perf_base);
 
     // 第二段：LoRA 模型推理
-    printf("\n========== LoRA model ==========\n");
-    first_decode = true;
-    perf_lora = perf;
-    ret = inference_qwen3_vl_llm_lora(&(rknn_app_ctx.llm), tensor, n_inputs, &perf_lora);
-    if (ret != 0) {
-        printf("inference qwen3_vl llm (lora) fail! ret=%d\n", ret);
-        goto out;
+    if (llm_lora_weight_path != nullptr || vision_lora_weight_path != nullptr) {
+        // 先释放 base session，再创建 LoRA session。同一 context 同时存在两个 session 时，
+        // 运行期会因传输缓冲不足导致 rknn_session_run 分配失败（ret=-7）。
+        ret = destroy_qwen3_vl_llm_base_session(&(rknn_app_ctx.llm));
+        ret = create_qwen3_vl_llm_lora_session(&(rknn_app_ctx.llm), llm_lora_weight_path);
+        if (ret != 0) {
+            printf("create qwen3_vl llm lora session fail! ret=%d\n", ret);
+            goto out;
+        }
+        printf("\n========== LoRA model ==========\n");
+        first_decode = true;
+        tensor.image.image_embed = img_embeds_lora;
+        perf_lora = perf;
+        perf_lora.vision_latency = vision_lora_latency;
+        ret = inference_qwen3_vl_llm_lora(&(rknn_app_ctx.llm), tensor, n_inputs, &perf_lora);
+        if (ret != 0) {
+            printf("inference qwen3_vl llm (lora) fail! ret=%d\n", ret);
+            goto out;
+        }
+        printf_perf(&perf_lora);
+    } else {
+        printf("\n========== LoRA model ========== (skipped: no llm_lora_weight_path)\n");
     }
-    printf_perf(&perf_lora);
 out:
     ret = release_qwen3_vl_model(&rknn_app_ctx);
 
@@ -410,6 +463,13 @@ out:
     {
         delete tokenizer;
         tokenizer = NULL;
+    }
+
+    if (img_embeds_lora != NULL && img_embeds_lora != img_embeds)
+    {
+        free(img_embeds_lora);
+        img_embeds_lora = NULL;
+        tensor.image.image_embed = NULL;
     }
 
     if (img_embeds != NULL)

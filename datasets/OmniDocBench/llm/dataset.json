@@ -1,0 +1,206 @@
+[
+    {
+        "image_path": "../vision/images",
+        "image": "PPT_8076_MEYER_Chapter_2_-_Language_Change_page_014.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "PPT_english-guidelines-for-humanities-students.zp199743_page_008.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "book_en_40.Puzzles.and.Problems.in.Probability.and.Mathematical.Statistics,.Schwarz,.Springer,.2008_page_115.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "book_en_搬书匠-3299-Swift Data Structure and Algorithms-2016-英文版_page_142.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "book_zh_DLT10902008_extracted_page_8.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "book_zh_GB115041989_extracted_page_9.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "color_textbook_zhonggaokao_小学_13.人教新起点英语（4-5年级）_人教新起点五年级英语上册_课本_人教新起点英语5A电子课本_page_060.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "color_textbook_zhonggaokao_小学_13.人教新起点英语（4-5年级）_人教新起点五年级英语下册_课本_人教新起点英语5B电子课本_page_046.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61524043.pdf_156.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "docstructbench_llm-raw-scihub-o.O-s00348-003-0689-7.pdf_3.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "eastmoney_34d623c64d12b5f02ffe4bff74f464b368270b1d6930192876bfe353d8fd6c30.pdf_0.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "eastmoney_d2bb183f5254ede5760932ac3118524aa7eddad551935713b435541f1525c1ee.pdf_7.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "exam_paper_2004-2019上海高考英语听力原文和答案_page_002.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "exam_paper_2016年安徽省中考英语试题（解析）_page_015.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "exam_paper_en-file-putnam-archive_1993_Problems_1993_page_001.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "exam_paper_en-file-putnam-archive_1996_Solutions_1996s_page_001.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "jiaocai_f32828acecb4282c87eaa554d2e1db74e418cd6845843012463a3324028bdd9d.pdf_9.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "jiaocai_jiaocai_en_932.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "jiaocaineedrop_jiaocai_needrop_en_2718.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "jiaocaineedrop_jiaocai_needrop_en_3375.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "magazine_TheEconomist.2023.11.18_page_068.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "magazine_TheEconomist.2024.03.02_page_031.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "newspaper_5e266dfd9c498cab274e12a7b4a75755_1.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "newspaper_e7246d706077d2064a6e667dfc73925e_1.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "notes_1ba14cb325bc448f7201b20502ecf2b5_37.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "notes_1ba14cb325bc448f7201b20502ecf2b5_99.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "page-7dfc88d8-6d95-446c-b910-2410e8552f76.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "page-c7fec126-2adb-4094-8110-5d81a92e05b0.png",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "scihub_AEM.01420-09.pdf_3.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "scihub_ijop.12033.pdf_5.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "yanbaopptmerge_yanbaoPPT_4000.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "yanbaopptmerge_yanbaoPPT_4635.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "yanbaor2_46d1322f4302f190a3c973320545b892f3a83f0931f1e3ac158069c324049979.pdf_8.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    },
+    {
+        "image_path": "../vision/images",
+        "image": "yanbaor2_864cbd5f0adeb98dea6cf7105cc8dfb272a9be974757633b2db8cf3f9a11c92b.pdf_33.jpg",
+        "input": "<image>document parsing.",
+        "target": ""
+    }
+]

@@ -78,3 +78,16 @@ install(FILES ${LLM_TOKENIZER_FILES} DESTINATION ./model)
 install(FILES ${LLM_EMBED_FILES} DESTINATION ./model)
 install(FILES ${VISION_RKNN_FILES} DESTINATION ./model)
 install(FILES ${VISION_WEIGHT_FILES} DESTINATION ./model)
+
+# 导出产物默认目录：examples/Qwen3_VL_LoRA/model/
+# *.lora_weight 不会被 *.weight 匹配到（文件名里是 "_weight" 而非 ".weight"），需要单独收集
+file(GLOB MODEL_RKNN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.rknn")
+file(GLOB MODEL_WEIGHT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.weight")
+file(GLOB MODEL_LORA_WEIGHT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.lora_weight")
+file(GLOB MODEL_TOKENIZER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.tokenizer.gguf")
+file(GLOB MODEL_EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.embed.bin")
+# 过滤掉 ONNX external data（language_model.* / onnx__MatMul_*），它们只在导出阶段使用
+list(FILTER MODEL_WEIGHT_FILES EXCLUDE REGEX "/language_model\\.|/onnx__")
+if (MODEL_RKNN_FILES OR MODEL_WEIGHT_FILES OR MODEL_LORA_WEIGHT_FILES OR MODEL_TOKENIZER_FILES OR MODEL_EMBED_FILES)
+    install(FILES ${MODEL_RKNN_FILES} ${MODEL_WEIGHT_FILES} ${MODEL_LORA_WEIGHT_FILES} ${MODEL_TOKENIZER_FILES} ${MODEL_EMBED_FILES} DESTINATION ./model)
+endif()

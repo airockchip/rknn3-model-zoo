@@ -14,8 +14,9 @@
   - [2.6 Embedding / Reranker](#26-embedding--reranker语义向量与排序)
   - [2.7 翻译](#27-翻译)
   - [2.8 OCR](#28-ocr)
-  - [2.9 CV（计算机视觉）](#29-cv计算机视觉)
-  - [2.10 预转换 RKNN 模型](#210-预转换-rknn-模型)
+  - [2.9 JEV（决策模型）](#29-jev决策模型)
+  - [2.10 CV（计算机视觉）](#210-cv计算机视觉)
+  - [2.11 预转换 RKNN 模型](#211-预转换-rknn-模型)
 - [3. 支持的平台](#3-支持的平台)
 - [4. 快速开始](#4-快速开始)
   - [4.1 环境准备](#41-环境准备)
@@ -37,6 +38,7 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 - **[RKNN3-Toolkit](https://github.com/airockchip/rknn3-toolkit)**：PC 端软件开发套件，支持模型转换、推理和性能评估等。
 - **RKNN3 Runtime**：板端运行时库，提供 C/C++ 编程接口，用于部署 RKNN 模型并加速 AI 应用。
 - **[RKNN3 Model Zoo](https://github.com/airockchip/rknn3-model-zoo)**：模型转换与部署示例仓库，包含 CNN / LLM / VLM 等多种模型的参考实现。
+- **[RKNN3 MCP](https://github.com/airockchip/rknn3-toolkit/blob/main/doc/CN/09_RKNN3_MCP_%E5%BF%AB%E9%80%9F%E5%85%A5%E9%97%A8_V0.1.0.pdf)**：RKNN3 MCP 是面向瑞芯微 RKNN3 平台的模型部署助手。用户可以通过支持 MCP 的 AI 开发工具，以自然语言描述需求，由 Agent 在 RKNN3 MCP 的指导下，协助完成模型分析、ONNX 导出、RKNN3 模型转换、精度分析和板端部署等任务，与本仓库的导出及部署示例配套使用。RKNN3 MCP 覆盖 CNN、ViT、LLM、VLM、ASR 等模型工作流，并支持 LoRA 转换与部署、多卡部署与推理等功能。
 
 本仓库提供了完整的模型部署流程：
 - **模型导出**：将 HuggingFace / PyTorch 模型导出为 ONNX 格式
@@ -51,25 +53,31 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 |------|---------|------|
 | [GLM-Edge](examples/glm_edge/README.md) | `examples/glm_edge` | 智谱 GLM Edge 系列端侧大语言模型 |
 | [MiniCPM5](examples/MiniCPM5/README.md) | `examples/MiniCPM5` | 面壁智能 MiniCPM5 大语言模型 |
+| [MiniCPM5-2B](examples/MiniCPM5_2B/README.md) | `examples/MiniCPM5_2B` | 面壁智能 MiniCPM5-2B 大语言模型 |
 | [Nanbeige4.2](examples/Nanbeige4_2/README.md) | `examples/Nanbeige4_2` | 南北阁 Looped Transformer 大语言模型 |
 | [Qwen2.5](examples/Qwen2_5/README.md) | `examples/Qwen2_5` | 通义千问 2.5 系列大语言模型 |
 | [Qwen3](examples/Qwen3/README.md) | `examples/Qwen3` | 通义千问 3 系列大语言模型 |
 | [Qwen3.5](examples/Qwen3_5/README.md) | `examples/Qwen3_5` | 通义千问 3.5 系列大语言模型 |
 | [FunctionGemma](examples/functiongemma/README.md) | `examples/functiongemma` | Google FunctionGemma 函数调用模型 |
 | [LFM2.5](examples/LFM2_5/README.md) | `examples/LFM2_5` | LiquidAI LFM2.5 混合架构语言模型（Full Attention + 流式短卷积） |
+| [Spark-X2.5](examples/Spark_X2_5/README.md) | `examples/Spark_X2_5` | Spark-X2.5 混合注意力大语言模型（full attention + 滑动窗口，1.7B / 4B） |
 
 ### 2.2 VLM
 
 | 模型 | 示例目录 | 说明 |
 |------|---------|------|
 | [FastVLM](examples/FastVLM/README.md) | `examples/FastVLM` | 苹果轻量级视觉语言模型 |
+| [LFM2.5-VL](examples/LFM2_5_VL/README.md) | `examples/LFM2_5_VL` | LiquidAI LFM2.5-VL 视觉语言模型（1.6B / 3B） |
 | [SmolVLM](examples/SmolVLM/README.md) | `examples/SmolVLM` | HuggingFace 轻量级视觉语言模型 |
 | [SmolVLM2](examples/SmolVLM2/README.md) | `examples/SmolVLM2` | HuggingFace SmolVLM 第二代视觉语言模型 |
 | [GME-Qwen2-VL](examples/GME-Qwen2-VL/README.md) | `examples/GME-Qwen2-VL` | 通义千问视觉嵌入模型 |
 | [InternVLM](examples/InternVLM/README.md) | `examples/InternVLM` | 书生视觉语言模型 |
 | [Janus-Pro](examples/Janus_Pro/README.md) | `examples/Janus_Pro` | DeepSeek 多模态理解与生成模型 |
+| [Mage-VL](examples/Mage_VL/README.md) | `examples/Mage_VL` | 微软 Mage-VL 视觉语言模型 |
 | [LocateAnything](examples/LocateAnything/README.md) | `examples/LocateAnything` | NVIDIA 视觉定位多模态模型（目标检测/短语定位/GUI 定位） |
+| [MiniCPM-V](examples/MiniCPM_V/README.md) | `examples/MiniCPM_V` | 面壁智能 MiniCPM-V 视觉语言模型 |
 | [MiniCPM-V-4](examples/MiniCPM_V_4/README.md) | `examples/MiniCPM_V_4` | 面壁智能 MiniCPM-V-4 视觉语言模型 | 
+| [MiniCPM-V-4.7-1B](examples/MiniCPM_V_4.7_1B/README.md) | `examples/MiniCPM_V_4.7_1B` | 面壁智能 MiniCPM-V-4.7-1B 视觉语言模型 |
 | [Qwen2.5-VL](examples/Qwen2_5_VL/README.md) | `examples/Qwen2_5_VL` | 通义千问 2.5 视觉语言模型 |
 | [Qwen3-VL](examples/Qwen3_VL/README.md) | `examples/Qwen3_VL` | 通义千问 3 视觉语言模型 |
 | [Qwen3-VL-LoRA](examples/Qwen3_VL_LoRA/README.md) | `examples/Qwen3_VL_LoRA` | 通义千问 3-VL LoRA 微调模型 |
@@ -89,7 +97,9 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 
 | 模型 | 示例目录 | 说明 |
 |------|---------|------|
+| [Paraformer](examples/paraformer/README.md) | `examples/paraformer` | FunASR SeaCo-Paraformer 中文离线语音识别模型 |
 | [Qwen3-ASR](examples/Qwen3_ASR/README.md) | `examples/Qwen3_ASR` | 通义千问语音识别（流式/非流式） |
+| [Qwen3-ForcedAligner](examples/Qwen3_ForcedAligner/README.md) | `examples/Qwen3_ForcedAligner` | 音频文本强制对齐，输出中文逐字、英文逐词的起止时间 |
 | [SenseVoiceSmall](examples/sensevoice_small/README.md) | `examples/sensevoice_small` | 阿里 FunAudioLLM 语音识别模型 |
 | [WeNet (Conformer)](examples/wenet/README.md) | `examples/wenet` | WeNet U2++ Conformer 流式中文语音识别 |
 | [Whisper](examples/whisper/README.md) | `examples/whisper` | OpenAI 多语言语音识别模型 |
@@ -108,6 +118,7 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 |------|---------|------|
 | [Qwen3-Embedding](examples/Qwen3_Embedding/README.md) | `examples/Qwen3_Embedding` | 通义千问文本向量模型 |
 | [Qwen3-Reranker](examples/Qwen3_Reranker/README.md) | `examples/Qwen3_Reranker` | 通义千问重排序模型 |
+| [WeMM-Embedding-2B](examples/WeMM-Embedding/README.md) | `examples/WeMM-Embedding` | 腾讯多模态向量模型（文本/图片/视频输出 2048 维向量） |
 
 ### 2.7 翻译
 
@@ -119,9 +130,22 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 
 | 模型 | 示例目录 | 说明 |
 |------|---------|------|
+| [dots.mocr](examples/dots.mocr/README.md) | `examples/dots.mocr` | 小红书 dots.mocr 多语言 OCR 视觉语言模型 |
+| [dots.ocr](examples/dots.ocr/README.md) | `examples/dots.ocr` | 小红书 dots.ocr 文档版面解析与 OCR 视觉语言模型 |
+| [HunyuanOCR-1.5](examples/HY_OCR_1_5/README.md) | `examples/HY_OCR_1_5` | 腾讯混元 HunyuanOCR-1.5 多模态 OCR 模型 |
 | [PaddleOCR-VL](examples/paddleocr_vl/README.md) | `examples/paddleocr_vl` | 百度 PaddleOCR-VL 视觉 OCR 模型 |
+| [Unlimited-OCR](examples/Unlimited-OCR/README.md) | `examples/Unlimited-OCR` | Unlimited-OCR 模型（SAM + Vision + LLM 拆分部署） |
 
-### 2.9 CV（计算机视觉）
+### 2.9 JEV（决策模型）
+
+JEV 模型本质上是决策（Decision）模型：不生成自由文本，而是将文本或图文输入直接转换为结构化的决策结果，如分类（选择）、是非判断（含概率）和评分。
+
+| 模型 | 示例目录 | 说明 |
+|------|---------|------|
+| [Intern-Decision](examples/Intern_Decision/README.md) | `examples/Intern_Decision` | 书生 Intern-Decision 文本/图文决策模型（分类、是非判断、评分） |
+| [Laya](examples/Laya/README.md) | `examples/Laya` | Laya 决策模型，用于选择、评分、真假判断（任务配置驱动） |
+
+### 2.10 CV（计算机视觉）
 
 | 模型 | 示例目录 | 说明 |
 |------|---------|------|
@@ -135,8 +159,9 @@ RKNN3 SDK 提供了将 AI 模型部署到 RK1820/RK1828 协处理器所需的完
 | [YOLO26-Pose](examples/yolo26_pose/README.md) | `examples/yolo26_pose` | Ultralytics YOLO26 人体姿态估计模型 |
 | [QA-CLIP](examples/QAClip/README.md) | `examples/QAClip` | 中英文图文相似度模型 |
 | [Depth Anything V3](examples/depth_anything_v3/README.md) | `examples/depth_anything_v3` | 立体深度估计模型 |
+| [RAFT-Stereo](examples/RAFT-Stereo/README.md) | `examples/RAFT-Stereo` | 立体匹配模型，从左右目图像对估计视差图 |
 
-### 2.10 预转换 RKNN 模型
+### 2.11 预转换 RKNN 模型
 
 用户可以从 [RKNN3_SDK 网盘](https://console.box.lenovo.com/l/H1fig1) 下载预先转换好的 RKNN 模型（提取码：`rknn`）。本次发布的模型位于 `RKNN3_SDK/rknn3_models/v1.1.0` 目录。
 
@@ -267,7 +292,7 @@ export LD_LIBRARY_PATH=./lib
 
 ### 5.1 SpeedUP 推理加速
 
-Qwen2.5-VL 和 Qwen3-VL 示例可链接 SpeedUP 第三方库，用于推理加速。
+Qwen2.5-VL、Qwen3-VL 和 Qwen3.5-VL 示例可链接 SpeedUP 库，用于推理加速。
 
 #### 文件位置
 
@@ -284,18 +309,26 @@ Qwen2.5-VL 和 Qwen3-VL 示例可链接 SpeedUP 第三方库，用于推理加�
 
 ```bash
 # Qwen2.5-VL
-./build-linux.sh -t rk3588 -a aarch64 -d Qwen2_5_VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen2_5_VL --enable_speedup
 
 # Qwen3-VL
-./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_VL --enable_speedup
+
+# Qwen3.5-VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_5_VL --enable_speedup
+
+# Android（先将 ANDROID_NDK_PATH 设置为 NDK 安装目录）
+./build-android.sh -t rk3588 -a arm64-v8a -d Qwen3_5_VL --enable_speedup
 ```
 
 编译完成后，`libSpeedUP.so` 会安装到对应 demo 的 `lib/` 目录。
 
+默认编译普通推理版本。添加 `--enable_speedup` 启用 SpeedUP，启用前需准备好 `speedup.h` 和对应平台的 `libSpeedUP.so`。不添加该参数或使用 `--disable_speedup`，则编译普通推理版本。
+
 #### 运行参数
 
 ```bash
-./rknn_qwen2_5_vl_demo \    # 或 ./rknn_qwen3_vl_demo
+./rknn_qwen2_5_vl_demo \    # 或 ./rknn_qwen3_vl_demo、./rknn_qwen3_5_vl_demo
     <vision_model_path> <vision_weight_path> \
     <llm_model_path> <llm_weight_path> \
     <tokenizer_path> <embedding_path> \
@@ -355,6 +388,26 @@ export LD_LIBRARY_PATH=./lib:$LD_LIBRARY_PATH
     /userdata/Qwen3-VL-model/Qwen3-VL-4B-llm.embed.bin \
     0xff 0xff \
     /userdata/rknn3-model-zoo/examples/Qwen2_5_VL/data/vision/demo.jpg \
+    "请描述这张图片" \
+    384 384 \
+    1.0
+```
+
+Qwen3.5-VL：
+
+```bash
+cd /userdata/rknn3-model-zoo/install/rk3588_linux_aarch64/rknn_Qwen3_5_VL_demo
+export LD_LIBRARY_PATH=./lib:$LD_LIBRARY_PATH
+
+./rknn_qwen3_5_vl_demo \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-vision.rknn \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-vision.weight \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.rknn \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.weight \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.tokenizer.gguf \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.embed.bin \
+    0xff 0xff \
+    /userdata/rknn3-model-zoo/examples/Qwen3_5_VL/data/vision/demo.jpg \
     "请描述这张图片" \
     384 384 \
     1.0

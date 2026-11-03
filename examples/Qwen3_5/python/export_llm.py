@@ -140,7 +140,7 @@ if __name__ == '__main__':
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     # 直接用注入的 export 版 modeling 类加载模型，避免 AutoModelForCausalLM 复用 quant 阶段
     # 缓存的原生 Qwen3_5ForCausalLM（其 linear attn 走 fla triton kernel，在 CPU 上无法导出 onnx）
-    model = modeling_module.Qwen3_5ForCausalLM.from_pretrained(args.model_path, torch_dtype="float32", device_map="cpu")
+    model = modeling_module.Qwen3_5ForCausalLM.from_pretrained(args.model_path, torch_dtype="float32", device_map="cpu", attn_implementation="eager")
 
     if fakeq_state is not None:
         model.load_state_dict(

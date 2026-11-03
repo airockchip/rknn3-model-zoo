@@ -1,0 +1,5 @@
+/model/
+/outputs/
+__pycache__/
+!/data/
+!/data/mel_128_filters.txt

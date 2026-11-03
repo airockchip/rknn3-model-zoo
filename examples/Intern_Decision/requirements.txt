@@ -1,0 +1,12 @@
+torch==2.7.0
+torchvision==0.22.0
+transformers==5.3.0
+accelerate
+onnx
+onnxruntime
+numpy
+Pillow
+huggingface_hub
+modelscope
+gguf
+sentencepiece

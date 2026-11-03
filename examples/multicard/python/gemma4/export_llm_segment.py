@@ -2,6 +2,9 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com/"
 import sys, torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from segment_planner import add_plan_arguments, write_plan_json
 
 from py_utils.export_llm_helper import causal_llm_to_onnx, update_config, export_tokenizer, export_llm_config, export_embed_weight
 from py_utils.tools import clear_llm_external_weight_in_dir, gen_quantize_dataset
@@ -25,9 +28,12 @@ if __name__ == '__main__':
     parser.add_argument("--export_llm_path", type=str, help="export llm onnx model path", required=False, default="../../model/llm_gemma/gemma-4-12b-it.onnx")
     parser.add_argument("--multi_segment", action='store_true', help="Export model as multiple ONNX segments split by transformer blocks")
     parser.add_argument("--num_segments", type=int, default=0, help="Number of segments to split into (0=auto, default splits ~8 layers per segment)")
+    parser.add_argument("--segment_layer_counts", "--segment-layer-counts", type=int, nargs="+", default=None, help="manual block count per segment; counts must sum to the total layer count and override --num_segments")
     parser.add_argument("--quant", action='store_true', help="Whether use GRQ quantization")
     parser.add_argument("--cali_dataset", default='../../../../datasets/llm_quant.json', help="some samples for grq quantized_algorithm")
+    parser.add_argument("--stop_after_segment", type=int, default=None, help="stop after this zero-based segment; useful for block-level validation")
     parser.add_argument("--modelscope", action='store_true', help="Whether download model from www.modelscope.cn")
+    add_plan_arguments(parser)
     args = parser.parse_args()
 
     if args.modelscope:
@@ -62,6 +68,7 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
@@ -88,3 +95,5 @@ if __name__ == '__main__':
 
     # Export embedding weight
     export_embed_weight(model.model.language_model.embed_tokens.weight, os.path.splitext(args.export_llm_path)[0] + '.embed.bin')
+    if args.multi_segment:
+        write_plan_json(args)

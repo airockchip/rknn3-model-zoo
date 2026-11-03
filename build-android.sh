@@ -3,8 +3,16 @@
 set -e
 
 echo "$0 $@"
-while getopts ":t:a:d:b:m:r:j" opt; do
+SPEEDUP_CMAKE_ARGS=(-UENABLE_SPEEDUP)
+while getopts ":t:a:d:b:m:r:j-:" opt; do
   case $opt in
+    -)
+      case "$OPTARG" in
+        enable_speedup) SPEEDUP_CMAKE_ARGS=(-DENABLE_SPEEDUP=ON) ;;
+        disable_speedup) SPEEDUP_CMAKE_ARGS=(-DENABLE_SPEEDUP=OFF) ;;
+        *) echo "Invalid option: --$OPTARG"; exit 1 ;;
+      esac
+      ;;
     t)
       TARGET_SOC=$OPTARG
       ;;
@@ -38,7 +46,7 @@ while getopts ":t:a:d:b:m:r:j" opt; do
 done
 
 if [ -z ${TARGET_SOC} ]  || [ -z ${TARGET_ARCH} ] ||  [ -z ${BUILD_DEMO_NAME} ]; then
-  echo "$0 -t <target> -a <arch> -d <build_demo_name> [-b <build_type>] [-m] [-r] [-j]"
+  echo "$0 -t <target> -a <arch> -d <build_demo_name> [-b <build_type>] [-m] [-r] [-j] [--enable_speedup|--disable_speedup]"
   echo ""
   echo "    -t : target (rk3588/rk3576/rk3572)"
   echo "    -a : arch (arm64-v8a/armeabi-v7a)"
@@ -47,6 +55,9 @@ if [ -z ${TARGET_SOC} ]  || [ -z ${TARGET_ARCH} ] ||  [ -z ${BUILD_DEMO_NAME} ];
   echo "    -m : enable address sanitizer, build_type need set to Debug"
   echo "    -r : disable rga, use cpu resize image"
   echo "    -j : disable libjpeg to avoid conflicts between libjpeg and opencv"
+  echo "    --enable_speedup : enable SpeedUP (library and header required)"
+  echo "    --disable_speedup : build without SpeedUP"
+  echo "    Without either flag, SpeedUP is disabled; available files only produce an enablement hint."
   echo "such as: $0  -t rk3588 -a arm64-v8a -d Qwen2_5"
   echo "Note: 'if you want to use opencv to read or save jpg files, use the '-j' option to disable libjpeg"
   echo ""
@@ -155,6 +166,7 @@ cmake ../../${BUILD_DEMO_PATH} \
         -DENABLE_ASAN=${ENABLE_ASAN} \
         -DDISABLE_RGA=${DISABLE_RGA} \
         -DDISABLE_LIBJPEG=${DISABLE_LIBJPEG} \
+        "${SPEEDUP_CMAKE_ARGS[@]}" \
         -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}
 # make VERBOSE=1
 make -j4

@@ -41,6 +41,7 @@ if __name__ == '__main__':
         args.model_path = snapshot_download(args.model_path)
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
         'torch_dtype': torch.bfloat16 
     }
@@ -81,6 +82,7 @@ if __name__ == '__main__':
 
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True,
         'torch_dtype': torch.bfloat16
     }

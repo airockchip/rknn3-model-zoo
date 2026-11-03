@@ -41,10 +41,12 @@ if __name__ == '__main__':
     ori_model_name = args.model_path
 
     kwargs = {
+        'attn_implementation': 'eager',
         'trust_remote_code': True
     }
     config = AutoConfig.from_pretrained(args.model_path, **kwargs)
     update_config(config, ['use_cache'], False)
+    update_config(config, ['_attn_implementation'], 'eager')
     kwargs['config'] = config
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **kwargs)
     if args.quant and torch.cuda.is_available():

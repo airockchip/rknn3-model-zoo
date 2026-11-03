@@ -29,6 +29,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset_path", type=str, help="model quantization dataset path", required=False, default=DATASET_PATH)
     parser.add_argument("--model_type", type=str, choices=['e2b', 'e4b'], default='e2b',
                         help="选择要导出的 Gemma-4 模型版本: e2b 或 e4b")
+    parser.add_argument('--platform', type=str, default= "rk1820", help='Target platform (e.g. rk1820)')
     args = parser.parse_args()
 
     # 根据 model_type 选择对应配置
@@ -94,7 +95,7 @@ if __name__ == '__main__':
         dynamic_input = [[[1, 1], [1, 1, 42, 256], [1, 1], [1, 1], [1, 1], [1, 1], [1]], 
                             [[1, 128], [1, 128, 42, 256], [1, 128], [1, 128], [1, 128], [1, 128], [1]]]
 
-    rknn.config(target_platform='rk1820', dynamic_input = dynamic_input, profile_mode=False,
+    rknn.config(target_platform=args.platform, dynamic_input = dynamic_input, profile_mode=False,
                 quantized_dtype='w4a16', quantized_algorithm='normal', quantized_method='group32',
                 llm_config=my_config,
                 input_attrs={'per_layer_inputs': {'dtype': 'float16', 'layout': 'NCHW'}})

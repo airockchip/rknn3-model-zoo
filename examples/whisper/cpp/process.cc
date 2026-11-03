@@ -255,7 +255,7 @@ static void matmul_by_opencv(float *A, float *B, std::vector<float> &C, int ROWS
 }
 #endif
 
-static void log_mel_spectrogram(float *audio_data, int audio_length, int cur_num_frames_of_stfts, float *filters, std::vector<float> &mel_spec)
+static void log_mel_spectrogram(float *audio_data, int audio_length, int cur_num_frames_of_stfts, float *filters, std::vector<float> &mel_spec, int n_mels)
 {
     std::vector<float> window(N_FFT);
     hann_window(window, N_FFT);
@@ -278,7 +278,7 @@ static void log_mel_spectrogram(float *audio_data, int audio_length, int cur_num
     std::vector<float> magnitudes(MELS_FILTERS_SIZE * (cur_num_frames_of_stfts - 1));
     compute_magnitudes(stfts_result_t, MELS_FILTERS_SIZE, cur_num_frames_of_stfts, magnitudes);
 
-    int ROWS_A = N_MELS;
+    int ROWS_A = n_mels;
     int COLS_A = MELS_FILTERS_SIZE;
     int COLS_B = cur_num_frames_of_stfts - 1;
 #if ENABLE_NEON
@@ -290,25 +290,26 @@ static void log_mel_spectrogram(float *audio_data, int audio_length, int cur_num
     clamp_and_log_max(mel_spec, ROWS_A, COLS_B);
 }
 
-void audio_preprocess(audio_buffer_t *audio, float *mel_filters, std::vector<float> &x_mel)
+void audio_preprocess(audio_buffer_t *audio, float *mel_filters, std::vector<float> &x_mel,
+                      int n_mels, int max_audio_length)
 {
     int audio_length = audio->num_frames;
     std::vector<float> ori_audio_data(audio->data, audio->data + audio_length);
 
-    if (audio_length >= MAX_AUDIO_LENGTH)
+    if (audio_length >= max_audio_length)
     {
-        std::vector<float> trim_audio_data(MAX_AUDIO_LENGTH);
-        std::copy(ori_audio_data.begin(), ori_audio_data.begin() + MAX_AUDIO_LENGTH, trim_audio_data.begin());
-        int cur_num_frames_of_stfts = MAX_AUDIO_LENGTH / HOP_LENGTH + 1;
-        log_mel_spectrogram(trim_audio_data.data(), MAX_AUDIO_LENGTH, cur_num_frames_of_stfts, mel_filters, x_mel);
+        std::vector<float> trim_audio_data(max_audio_length);
+        std::copy(ori_audio_data.begin(), ori_audio_data.begin() + max_audio_length, trim_audio_data.begin());
+        int cur_num_frames_of_stfts = max_audio_length / HOP_LENGTH + 1;
+        log_mel_spectrogram(trim_audio_data.data(), max_audio_length, cur_num_frames_of_stfts, mel_filters, x_mel, n_mels);
     }
     else
     {
-        std::vector<float> padded_audio_data(MAX_AUDIO_LENGTH, 0.0f);
+        std::vector<float> padded_audio_data(max_audio_length, 0.0f);
         std::copy(ori_audio_data.begin(), ori_audio_data.end(), padded_audio_data.begin());
 
-        int cur_num_frames_of_stfts = MAX_AUDIO_LENGTH / HOP_LENGTH + 1;
-        log_mel_spectrogram(padded_audio_data.data(), MAX_AUDIO_LENGTH, cur_num_frames_of_stfts, mel_filters, x_mel);
+        int cur_num_frames_of_stfts = max_audio_length / HOP_LENGTH + 1;
+        log_mel_spectrogram(padded_audio_data.data(), max_audio_length, cur_num_frames_of_stfts, mel_filters, x_mel, n_mels);
     }
 }
 
@@ -331,10 +332,10 @@ __attribute__((weak)) int read_mel_filters(const char *fileName, float *data, in
 
     fclose(file);
 
-    return 0;
+    return line_count == max_lines ? 0 : -1;
 }
 
-int read_vocab(const char *fileName, VocabEntry *vocab)
+int read_vocab(const char *fileName, VocabEntry *vocab, int vocab_size)
 {
     FILE *fp;
     char line[512];
@@ -349,14 +350,26 @@ int read_vocab(const char *fileName, VocabEntry *vocab)
     int count = 0;
     while (fgets(line, sizeof(line), fp))
     {
-        vocab[count].token = strdup(strchr(line, ' ') + 1); // Get token after the first space
-        vocab[count].index = atoi(line);                    // Get index before the first space
+        char *piece = strchr(line, ' ');
+        if (count >= vocab_size || !piece || atoi(line) != count)
+        {
+            printf("Invalid vocabulary entry at row %d in %s\n", count, fileName);
+            fclose(fp);
+            return -1;
+        }
+        vocab[count].token = strdup(piece + 1);
+        if (!vocab[count].token)
+        {
+            fclose(fp);
+            return -1;
+        }
+        vocab[count].index = count;
         count++;
     }
 
     fclose(fp);
 
-    return 0;
+    return count == vocab_size ? 0 : -1;
 }
 
 void replace_substr(std::string &str, const std::string &from, const std::string &to)
@@ -442,9 +455,6 @@ std::string base64_decode(const std::string &encoded_string)
     return decoded_string;
 }
 
-static const int32_t WHISPER_SOT_TOKEN = 50258;
-static const int32_t WHISPER_TIMESTAMP_BEGIN_TOKEN = 50364;
-
 std::string normalize_piece(const std::string &piece)
 {
     std::string normalized = piece;
@@ -454,17 +464,13 @@ std::string normalize_piece(const std::string &piece)
     return normalized;
 }
 
-std::string decode_whisper_tokens(VocabEntry *vocab, const std::vector<int32_t> &token_ids, const char *task)
+std::string decode_whisper_tokens(VocabEntry *vocab, const std::vector<int32_t> &token_ids, const char *task, int vocab_size)
 {
     std::string text;
     for (size_t i = 0; i < token_ids.size(); ++i)
     {
         int32_t token_id = token_ids[i];
-        if (token_id < 0 || token_id >= VOCAB_NUM || token_id >= WHISPER_TIMESTAMP_BEGIN_TOKEN)
-        {
-            continue;
-        }
-        if (token_id >= WHISPER_SOT_TOKEN && token_id < WHISPER_TIMESTAMP_BEGIN_TOKEN)
+        if (token_id < 0 || token_id >= vocab_size || token_id >= whisper_tokens::EOT)
         {
             continue;
         }
@@ -472,12 +478,9 @@ std::string decode_whisper_tokens(VocabEntry *vocab, const std::vector<int32_t> 
         {
             continue;
         }
-        text += normalize_piece(vocab[token_id].token);
+        std::string piece = normalize_piece(vocab[token_id].token);
+        text += task && strcmp(task, "zh") == 0 ? base64_decode(piece) : piece;
     }
 
-    if (task && strcmp(task, "zh") == 0 && !text.empty())
-    {
-        return base64_decode(text);
-    }
     return text;
 }

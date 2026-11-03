@@ -1,0 +1,8 @@
+numpy>=1.26,<3
+torch==2.7.0
+transformers==4.57.3
+huggingface-hub>=0.34,<1
+safetensors>=0.4
+onnx==1.18.0
+tokenizers>=0.22,<0.23
+modelscope>=1.20

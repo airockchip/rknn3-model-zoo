@@ -14,8 +14,9 @@
   - [2.6 Embedding / Reranker](#26-embedding--reranker)
   - [2.7 Translation](#27-translation)
   - [2.8 OCR](#28-ocr)
-  - [2.9 CV (Computer Vision)](#29-cv-computer-vision)
-  - [2.10 Pre-converted RKNN Models](#210-pre-converted-rknn-models)
+  - [2.9 JEV (Decision Models)](#29-jev-decision-models)
+  - [2.10 CV (Computer Vision)](#210-cv-computer-vision)
+  - [2.11 Pre-converted RKNN Models](#211-pre-converted-rknn-models)
 - [3. Supported Platforms](#3-supported-platforms)
 - [4. Quick Start](#4-quick-start)
   - [4.1 Environment Setup](#41-environment-setup)
@@ -37,6 +38,7 @@ RKNN3 SDK provides the complete software stack for deploying AI models on RK1820
 - **[RKNN3-Toolkit](https://github.com/airockchip/rknn3-toolkit)**: PC-side software development kit for model conversion, inference, performance evaluation, etc.
 - **RKNN3 Runtime**: On-board runtime library providing C/C++ programming interfaces for deploying RKNN models and accelerating AI applications.
 - **[RKNN3 Model Zoo](https://github.com/airockchip/rknn3-model-zoo)**: Model conversion and deployment example repository, including reference implementations for CNN / LLM / VLM and other models.
+- **[RKNN3 MCP](https://github.com/airockchip/rknn3-toolkit/blob/main/doc/EN/09_RKNN3_MCP_QuickStart_V0.1.0.pdf)**: RKNN3 MCP is a model deployment assistant for the Rockchip RKNN3 platform. Through AI development tools that support MCP, users can describe their requirements in natural language, and the Agent — guided by RKNN3 MCP — helps complete model analysis, ONNX export, RKNN3 model conversion, accuracy analysis, and on-board deployment, working alongside the export and deployment examples in this repository. RKNN3 MCP covers CNN, ViT, LLM, VLM, ASR, and other model workflows, and supports LoRA conversion and deployment as well as multi-NPU deployment and inference.
 
 This repository provides a complete model deployment workflow:
 - **Model Export**: Export HuggingFace / PyTorch models to ONNX format
@@ -51,25 +53,31 @@ This repository provides a complete model deployment workflow:
 |-------|-------------------|-------------|
 | [GLM-Edge](examples/glm_edge/README.md) | `examples/glm_edge` | GLM Edge series on-device LLM |
 | [MiniCPM5](examples/MiniCPM5/README.md) | `examples/MiniCPM5` | MiniCPM5 LLM |
+| [MiniCPM5-2B](examples/MiniCPM5_2B/README.md) | `examples/MiniCPM5_2B` | MiniCPM5-2B LLM |
 | [Nanbeige4.2](examples/Nanbeige4_2/README.md) | `examples/Nanbeige4_2` | Nanbeige Looped Transformer LLM |
 | [Qwen2.5](examples/Qwen2_5/README.md) | `examples/Qwen2_5` | Tongyi Qianwen 2.5 series LLM |
 | [Qwen3](examples/Qwen3/README.md) | `examples/Qwen3` | Tongyi Qianwen 3 series LLM |
 | [Qwen3.5](examples/Qwen3_5/README.md) | `examples/Qwen3_5` | Tongyi Qianwen 3.5 series LLM |
 | [FunctionGemma](examples/functiongemma/README.md) | `examples/functiongemma` | Google FunctionGemma function-calling model |
 | [LFM2.5](examples/LFM2_5/README.md) | `examples/LFM2_5` | LiquidAI LFM2.5 hybrid-architecture LLM (Full Attention + streaming short convolution) |
+| [Spark-X2.5](examples/Spark_X2_5/README.md) | `examples/Spark_X2_5` | Spark-X2.5 hybrid-attention LLM (full attention + sliding window, 1.7B / 4B) |
 
 ### 2.2 VLM
 
 | Model | Example Directory | Description |
 |-------|-------------------|-------------|
 | [FastVLM](examples/FastVLM/README.md) | `examples/FastVLM` | Apple lightweight vision-language model |
+| [LFM2.5-VL](examples/LFM2_5_VL/README.md) | `examples/LFM2_5_VL` | LiquidAI LFM2.5-VL vision-language model (1.6B / 3B) |
 | [SmolVLM](examples/SmolVLM/README.md) | `examples/SmolVLM` | HuggingFace lightweight vision-language model |
 | [SmolVLM2](examples/SmolVLM2/README.md) | `examples/SmolVLM2` | HuggingFace SmolVLM second-generation vision-language model |
 | [GME-Qwen2-VL](examples/GME-Qwen2-VL/README.md) | `examples/GME-Qwen2-VL` | Tongyi Qianwen vision embedding model |
 | [InternVLM](examples/InternVLM/README.md) | `examples/InternVLM` | InternVL vision-language model |
 | [Janus-Pro](examples/Janus_Pro/README.md) | `examples/Janus_Pro` | DeepSeek multimodal understanding and generation model |
+| [Mage-VL](examples/Mage_VL/README.md) | `examples/Mage_VL` | Microsoft Mage-VL vision-language model |
 | [LocateAnything](examples/LocateAnything/README.md) | `examples/LocateAnything` | NVIDIA visual grounding multimodal model (object detection / phrase grounding / GUI grounding) |
+| [MiniCPM-V](examples/MiniCPM_V/README.md) | `examples/MiniCPM_V` | OpenBMB MiniCPM-V vision-language model |
 | [MiniCPM-V-4](examples/MiniCPM_V_4/README.md) | `examples/MiniCPM_V_4` | MiniCPM-V-4 vision-language model |
+| [MiniCPM-V-4.7-1B](examples/MiniCPM_V_4.7_1B/README.md) | `examples/MiniCPM_V_4.7_1B` | MiniCPM-V-4.7-1B vision-language model |
 | [Qwen2.5-VL](examples/Qwen2_5_VL/README.md) | `examples/Qwen2_5_VL` | Tongyi Qianwen 2.5 vision-language model |
 | [Qwen3-VL](examples/Qwen3_VL/README.md) | `examples/Qwen3_VL` | Tongyi Qianwen 3 vision-language model |
 | [Qwen3-VL-LoRA](examples/Qwen3_VL_LoRA/README.md) | `examples/Qwen3_VL_LoRA` | Tongyi Qianwen 3-VL LoRA fine-tuned model |
@@ -89,7 +97,9 @@ This repository provides a complete model deployment workflow:
 
 | Model | Example Directory | Description |
 |-------|-------------------|-------------|
+| [Paraformer](examples/paraformer/README.md) | `examples/paraformer` | FunASR SeaCo-Paraformer Chinese offline speech recognition |
 | [Qwen3-ASR](examples/Qwen3_ASR/README.md) | `examples/Qwen3_ASR` | Tongyi Qianwen speech recognition (streaming / non-streaming) |
+| [Qwen3-ForcedAligner](examples/Qwen3_ForcedAligner/README.md) | `examples/Qwen3_ForcedAligner` | Audio-text forced alignment with per-character (Chinese) / per-word (English) timestamps |
 | [SenseVoiceSmall](examples/sensevoice_small/README.md) | `examples/sensevoice_small` | Alibaba FunAudioLLM speech recognition model |
 | [WeNet (Conformer)](examples/wenet/README.md) | `examples/wenet` | WeNet U2++ Conformer streaming Chinese speech recognition |
 | [Whisper](examples/whisper/README.md) | `examples/whisper` | OpenAI multilingual speech recognition model |
@@ -108,6 +118,7 @@ This repository provides a complete model deployment workflow:
 |-------|-------------------|-------------|
 | [Qwen3-Embedding](examples/Qwen3_Embedding/README.md) | `examples/Qwen3_Embedding` | Tongyi Qianwen text embedding model |
 | [Qwen3-Reranker](examples/Qwen3_Reranker/README.md) | `examples/Qwen3_Reranker` | Tongyi Qianwen reranker model |
+| [WeMM-Embedding-2B](examples/WeMM-Embedding/README.md) | `examples/WeMM-Embedding` | Tencent multimodal embedding model (text / image / video to 2048-dim vector) |
 
 ### 2.7 Translation
 
@@ -119,9 +130,22 @@ This repository provides a complete model deployment workflow:
 
 | Model | Example Directory | Description |
 |-------|-------------------|-------------|
+| [dots.mocr](examples/dots.mocr/README.md) | `examples/dots.mocr` | rednote dots.mocr multilingual OCR vision-language model |
+| [dots.ocr](examples/dots.ocr/README.md) | `examples/dots.ocr` | rednote dots.ocr document layout parsing and OCR vision-language model |
+| [HunyuanOCR-1.5](examples/HY_OCR_1_5/README.md) | `examples/HY_OCR_1_5` | Tencent HunyuanOCR-1.5 multimodal OCR model |
 | [PaddleOCR-VL](examples/paddleocr_vl/README.md) | `examples/paddleocr_vl` | Baidu PaddleOCR-VL visual OCR model |
+| [Unlimited-OCR](examples/Unlimited-OCR/README.md) | `examples/Unlimited-OCR` | Unlimited-OCR model (SAM + Vision + LLM split deployment) |
 
-### 2.9 CV (Computer Vision)
+### 2.9 JEV (Decision Models)
+
+JEV models are essentially decision models: instead of generating free-form text, they turn text or image-text input into structured decisions such as classification (choice), yes/no judgment (with probability), and scoring.
+
+| Model | Example Directory | Description |
+|-------|-------------------|-------------|
+| [Intern-Decision](examples/Intern_Decision/README.md) | `examples/Intern_Decision` | Intern-Decision text / image-text decision model (classification, yes/no judgment, scoring) |
+| [Laya](examples/Laya/README.md) | `examples/Laya` | Laya decision model for choice / scoring / true-false questions (task-config driven) |
+
+### 2.10 CV (Computer Vision)
 
 | Model | Example Directory | Description |
 |-------|-------------------|-------------|
@@ -135,8 +159,9 @@ This repository provides a complete model deployment workflow:
 | [YOLO26-Pose](examples/yolo26_pose/README.md) | `examples/yolo26_pose` | Ultralytics YOLO26 human pose estimation model |
 | [QA-CLIP](examples/QAClip/README.md) | `examples/QAClip` | Chinese-English image-text similarity model |
 | [Depth Anything V3](examples/depth_anything_v3/README.md) | `examples/depth_anything_v3` | Multi-view stereo depth estimation model |
+| [RAFT-Stereo](examples/RAFT-Stereo/README.md) | `examples/RAFT-Stereo` | Stereo matching model for disparity estimation from left/right image pairs |
 
-### 2.10 Pre-converted RKNN Models
+### 2.11 Pre-converted RKNN Models
 
 Users can download pre-converted RKNN models from the [RKNN3_SDK cloud drive](https://console.box.lenovo.com/l/H1fig1) (access code: `rknn`). The models for this release are available under `RKNN3_SDK/rknn3_models/v1.1.0`.
 
@@ -267,7 +292,7 @@ The export scripts of each model share the following common parameters (specific
 
 ### 5.1 SpeedUP Inference Acceleration
 
-The Qwen2.5-VL and Qwen3-VL examples can link against the SpeedUP third-party library for inference acceleration.
+The Qwen2.5-VL, Qwen3-VL, and Qwen3.5-VL examples can link against the SpeedUP library for inference acceleration.
 
 #### File Location
 
@@ -284,18 +309,26 @@ Keep the following files in the release package:
 
 ```bash
 # Qwen2.5-VL
-./build-linux.sh -t rk3588 -a aarch64 -d Qwen2_5_VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen2_5_VL --enable_speedup
 
 # Qwen3-VL
-./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_VL --enable_speedup
+
+# Qwen3.5-VL
+./build-linux.sh -t rk3588 -a aarch64 -d Qwen3_5_VL --enable_speedup
+
+# Android (set ANDROID_NDK_PATH to your NDK installation first)
+./build-android.sh -t rk3588 -a arm64-v8a -d Qwen3_5_VL --enable_speedup
 ```
 
 After installation, `libSpeedUP.so` is copied into the corresponding demo `lib/` directory.
 
+SpeedUP is disabled by default. Add `--enable_speedup` to enable it; provide `speedup.h` and `libSpeedUP.so` for the target platform before building. Omit this flag or use `--disable_speedup` to build for normal inference.
+
 #### Runtime Arguments
 
 ```bash
-./rknn_qwen2_5_vl_demo \    # or ./rknn_qwen3_vl_demo
+./rknn_qwen2_5_vl_demo \    # or ./rknn_qwen3_vl_demo, ./rknn_qwen3_5_vl_demo
     <vision_model_path> <vision_weight_path> \
     <llm_model_path> <llm_weight_path> \
     <tokenizer_path> <embedding_path> \
@@ -355,6 +388,26 @@ export LD_LIBRARY_PATH=./lib:$LD_LIBRARY_PATH
     /userdata/Qwen3-VL-model/Qwen3-VL-4B-llm.embed.bin \
     0xff 0xff \
     /userdata/rknn3-model-zoo/examples/Qwen2_5_VL/data/vision/demo.jpg \
+    "Describe this image" \
+    384 384 \
+    1.0
+```
+
+Qwen3.5-VL:
+
+```bash
+cd /userdata/rknn3-model-zoo/install/rk3588_linux_aarch64/rknn_Qwen3_5_VL_demo
+export LD_LIBRARY_PATH=./lib:$LD_LIBRARY_PATH
+
+./rknn_qwen3_5_vl_demo \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-vision.rknn \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-vision.weight \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.rknn \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.weight \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.tokenizer.gguf \
+    /userdata/Qwen3.5-VL-model/Qwen3.5-2B-llm.embed.bin \
+    0xff 0xff \
+    /userdata/rknn3-model-zoo/examples/Qwen3_5_VL/data/vision/demo.jpg \
     "Describe this image" \
     384 384 \
     1.0

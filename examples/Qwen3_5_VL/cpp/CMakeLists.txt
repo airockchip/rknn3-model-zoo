@@ -37,6 +37,13 @@ add_executable(${PROJECT_NAME}
     ${vision_file}
 )
 
+if(ENABLE_SPEEDUP)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_SPEEDUP)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${SPEEDUP_INCLUDES})
+    target_link_libraries(${PROJECT_NAME} ${SPEEDUP_LIB})
+    install(PROGRAMS ${SPEEDUP_LIB} DESTINATION lib)
+endif()
+
 target_link_libraries(${PROJECT_NAME}
     timeutils
 	imageutils
@@ -68,9 +75,11 @@ install(TARGETS ${PROJECT_NAME} DESTINATION .)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../data/vision/demo.jpg DESTINATION ./model)
 file(GLOB RKNN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*/*.rknn")
 file(GLOB WEIGHT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*/*.weight")
+file(GLOB LORA_WEIGHT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*/*.lora_weight")
 file(GLOB TOKENIZER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/llm/*.tokenizer.gguf")
 file(GLOB EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/llm/*.embed.bin")
 install(FILES ${RKNN_FILES} DESTINATION ./model)
 install(FILES ${WEIGHT_FILES} DESTINATION ./model)
+install(FILES ${LORA_WEIGHT_FILES} DESTINATION ./model)
 install(FILES ${TOKENIZER_FILES} DESTINATION ./model)
 install(FILES ${EMBED_FILES} DESTINATION ./model)

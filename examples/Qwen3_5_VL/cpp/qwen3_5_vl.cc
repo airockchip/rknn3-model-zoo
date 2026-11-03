@@ -22,6 +22,15 @@
 #include "rknn3_api.h"
 #include "time_utils.h"
 
+#ifdef ENABLE_SPEEDUP
+static const SpeedUPConfig g_speedup_config = {
+    .tau = 0.90f,
+    .min_ratio = 0.6f,
+    .max_ratio = 0.75f,
+    .stride = 16
+};
+
+#endif
 
 int init_internal_share(rknn_app_context_t* app_ctx, uint32_t core_mask_vision, uint32_t core_mask_llm)
 {
@@ -280,7 +289,7 @@ int release_internal_share(rknn_app_context_t* app_ctx)
 
 
 
-int init_qwen3_5_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_path, const char* llm_weight_path, const char* vision_model_path, const char* vision_weight_path, rknn3_llm_param* params, int n_params, RKLLMCallback* callback, uint32_t vision_core_mask, uint32_t llm_core_mask)
+int init_qwen3_5_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_path, const char* llm_weight_path, const char* vision_model_path, const char* vision_weight_path, rknn3_llm_param* params, int n_params, RKLLMCallback* callback, uint32_t vision_core_mask, uint32_t llm_core_mask, const char* vision_lora_weight_path)
 {
     int ret = 0;
 
@@ -311,45 +320,180 @@ int init_qwen3_5_vl_model(rknn_app_context_t* app_ctx, const char* llm_model_pat
         return ret;
     }
 
+    // rknn3_lora_init must run after shared internal memory is configured;
+    // otherwise rknn3_set_internal_mem can invalidate the loaded adapter.
+    if (vision_lora_weight_path != nullptr) {
+        printf("--> setup qwen3_5_vl vision LoRA\n");
+        ret = setup_qwen3_5_vl_vision_lora(&(app_ctx->vision), vision_lora_weight_path);
+        if (ret < 0) {
+            printf("setup qwen3_5_vl vision LoRA failed! ret=%d\n", ret);
+            return ret;
+        }
+    }
+
+#ifdef ENABLE_SPEEDUP
+    app_ctx->base_callback = *callback;
+    app_ctx->speedup = speedup_create(&g_speedup_config);
+    if (!app_ctx->speedup) {
+        printf("[SpeedUP] create failed; fallback to normal inference without SpeedUP\n");
+    } else {
+        ret = speedup_attach_mrope_callback(app_ctx->speedup,
+                                           app_ctx->llm.rknn_ctx,
+                                           app_ctx->llm.rknn_sess,
+                                           &app_ctx->base_callback);
+        if (ret != 0) {
+            printf("[SpeedUP] initialization failed, ret=%d; fallback to normal inference without SpeedUP\n", ret);
+            ret = speedup_detach_mrope_callback(app_ctx->speedup, app_ctx->llm.rknn_sess);
+            if (ret != 0) {
+                printf("[SpeedUP] fallback failed! ret=%d; stop inference\n", ret);
+                return ret;
+            }
+            speedup_destroy(app_ctx->speedup);
+            app_ctx->speedup = NULL;
+        } else {
+            printf("[SpeedUP] ready, version=%s\n",
+                   speedup_get_version());
+        }
+    }
+#endif
     return ret;
+}
+
+int prepare_qwen3_5_vl_lora_session(rknn_app_context_t* app_ctx,
+                                    const char* llm_lora_weight_path)
+{
+    if (!app_ctx) {
+        return -1;
+    }
+
+#ifdef ENABLE_SPEEDUP
+    // SpeedUP is attached to the Base session. It cannot survive the session
+    // replacement and is intentionally disabled for the LoRA comparison pass.
+    if (app_ctx->speedup) {
+        speedup_cleanup(app_ctx->speedup, app_ctx->llm.rknn_sess);
+        app_ctx->speedup = NULL;
+        printf("[SpeedUP] disabled for LoRA session\n");
+    }
+#endif
+
+    int ret = destroy_qwen3_5_vl_llm_base_session(&(app_ctx->llm));
+    if (ret < 0) {
+        return ret;
+    }
+    return create_qwen3_5_vl_llm_lora_session(&(app_ctx->llm), llm_lora_weight_path);
 }
 
 int release_qwen3_5_vl_model(rknn_app_context_t *app_ctx)
 {
+#ifdef ENABLE_SPEEDUP
+    if (app_ctx->speedup) {
+        speedup_cleanup(app_ctx->speedup, app_ctx->llm.rknn_sess);
+        app_ctx->speedup = NULL;
+    }
+#endif
     release_internal_share(app_ctx);
     release_qwen3_5_vl_vision(&(app_ctx->vision));
     release_qwen3_5_vl_llm(&(app_ctx->llm));
     return 0;
 }
 
-int inference_qwen3_5_vl_model(rknn_app_context_t *app_ctx, image_buffer_t *img, float16 *img_embeds, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t *perf)
+int inference_qwen3_5_vl_model_vision(rknn_app_context_t* app_ctx,
+                                      image_buffer_t* img,
+                                      float16* img_embeds,
+                                      rknn_perf_metrics_t* perf,
+                                      bool use_lora)
 {
-    int ret;
-
-    if ((!app_ctx) || (!img))
-    {
-        printf("app_ctx or img is NULL");
+    if (!app_ctx || !img || !img_embeds || !perf) {
+        printf("app_ctx, img, img_embeds or perf is NULL\n");
         return -1;
     }
-
-    printf("--> inference qwen3_5_vl vision model\n");
+    printf("--> inference qwen3_5_vl vision model (%s)\n", use_lora ? "lora" : "base");
     int64_t start_us = getCurrentTimeUs();
-    ret = inference_qwen3_5_vl_vision(&(app_ctx->vision), img, img_embeds);
+    int ret = inference_qwen3_5_vl_vision(&(app_ctx->vision), img, img_embeds, use_lora);
     perf->vision_latency = getCurrentTimeUs() - start_us;
-    if (ret != 0)
-    {
+    if (ret != 0) {
         printf("inference qwen3_5_vl vision model fail! ret=%d\n", ret);
         return ret;
     }
+    return 0;
+}
 
-    printf("--> inference qwen3_5_vl llm model\n");  
-    ret = inference_qwen3_5_vl_llm(&(app_ctx->llm), tensor, n_inputs, perf);
+int inference_qwen3_5_vl_model_llm(rknn_app_context_t* app_ctx,
+                                   rknn3_llm_multimodal_tensor tensor,
+                                   int n_inputs,
+                                   rknn_perf_metrics_t* perf,
+                                   bool use_lora,
+                                   float speedup_ratio)
+{
+    if (!app_ctx || !perf || n_inputs != 1) {
+        printf("Qwen3.5-VL requires one LLM input descriptor\n");
+        return -1;
+    }
 
-    if (ret != 0)
-    {
+    int ret = 0;
+
+#ifdef ENABLE_SPEEDUP
+    // SpeedUP is bound to the Base session and is not used for a LoRA pass.
+    if (use_lora) {
+        if (app_ctx->speedup) {
+            printf("[SpeedUP] LoRA session requested; SpeedUP should have been released\n");
+        }
+    } else if (!app_ctx->speedup) {
+        printf("[SpeedUP] handle is NULL, run normal inference without SpeedUP\n");
+    } else {
+        int original_tokens = tensor.image.n_image_tokens;
+        int output_count_per_input = original_tokens;
+        ret = speedup_prepare_rknn_multimodal_tensor(app_ctx->speedup,
+                                                   tensor.image.image_embed,
+                                                   app_ctx->vision.embeds_shape,
+                                                   app_ctx->vision.embeds_ndims,
+                                                   &tensor,
+                                                   app_ctx->vision.model_width,
+                                                   app_ctx->vision.model_height,
+                                                   speedup_ratio,
+                                                   app_ctx->llm.rknn_sess,
+                                                   &output_count_per_input);
+        if (ret != 0) {
+            printf("[SpeedUP] processing failed! ret=%d; fallback to normal inference without SpeedUP\n", ret);
+            ret = speedup_detach_mrope_callback(app_ctx->speedup, app_ctx->llm.rknn_sess);
+            if (ret != 0) {
+                printf("[SpeedUP] fallback failed! ret=%d; stop inference\n", ret);
+                return ret;
+            }
+            speedup_destroy(app_ctx->speedup);
+            app_ctx->speedup = NULL;
+        }
+    }
+#endif
+    printf("--> inference qwen3_5_vl llm model\n");
+    ret = use_lora
+        ? inference_qwen3_5_vl_llm_lora(&(app_ctx->llm), tensor, n_inputs, perf)
+        : inference_qwen3_5_vl_llm_base(&(app_ctx->llm), tensor, n_inputs, perf);
+
+    if (ret != 0) {
         printf("inference qwen3_5_vl llm model fail! ret=%d\n", ret);
         return ret;
     }
+    return 0;
+}
 
-    return ret;
+int inference_qwen3_5_vl_model(rknn_app_context_t *app_ctx,
+                               image_buffer_t *img,
+                               float16 *img_embeds,
+                               rknn3_llm_multimodal_tensor tensor,
+                               int n_inputs,
+                               rknn_perf_metrics_t *perf,
+                               float speedup_ratio)
+{
+    if (!app_ctx || !img || !img_embeds || !perf || n_inputs != 1) {
+        printf("invalid qwen3.5-vl inference argument\n");
+        return -1;
+    }
+
+    int ret = inference_qwen3_5_vl_model_vision(app_ctx, img, img_embeds, perf, false);
+    if (ret != 0) {
+        return ret;
+    }
+    return inference_qwen3_5_vl_model_llm(app_ctx, tensor, n_inputs, perf, false, speedup_ratio);
+
 }

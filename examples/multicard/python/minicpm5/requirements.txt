@@ -1,0 +1,4 @@
+torch==2.7.0
+transformers==4.57.1
+onnx==1.18.0
+accelerate>=0.26.0

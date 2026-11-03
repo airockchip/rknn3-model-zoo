@@ -286,6 +286,45 @@ def causal_llm_to_onnx(model, args):
 
     print(f"Exported to {os.path.abspath(args.export_llm_path)}")
 
+
+def _build_minicpm4_7_export_causal_mask(hidden_states, attention_mask):
+    """Build the MiniCPM-V 4.7 Qwen3.5-text prefill causal mask.
+
+    Transformers 5.6's ``create_causal_mask`` passes ``inputs_embeds.shape[1]``
+    to the selected mask interface.  The legacy ``torch.onnx.export`` tracer
+    represents that value as a scalar tensor, while ``sdpa_mask`` interprets
+    any tensor there as the old 1-D ``cache_position`` argument and indexes
+    element zero.  That combination raises ``IndexError`` during export.
+
+    MiniCPM-V 4.7 multi-segment exports do not carry a past cache: they always
+    run the prefill path with positions starting at zero.  The explicit mask
+    below is therefore equivalent to the mask returned by the Transformers
+    factory for this wrapper, while keeping the sequence dimension dynamic in
+    ONNX.
+    """
+    _, seq_len = hidden_states.shape[:2]
+    dtype = hidden_states.dtype
+    device = hidden_states.device
+    min_dtype = torch.finfo(dtype).min
+
+    causal_mask = torch.full(
+        (seq_len, seq_len), min_dtype, dtype=dtype, device=device
+    )
+    causal_mask = torch.triu(causal_mask, diagonal=1)[None, None, :, :]
+
+    # Keep support for callers that already provide a prepared 4-D mask.
+    if attention_mask is None or attention_mask.dim() == 4:
+        return attention_mask if attention_mask is not None else causal_mask
+
+    if attention_mask.dim() == 2:
+        # Use where instead of adding two ``min_dtype`` values.  The latter
+        # overflows to ``-inf`` for padded causal positions, while the HF
+        # eager mask keeps those entries at the finite ``finfo.min`` value.
+        valid_tokens = attention_mask[:, None, None, :].to(torch.bool)
+        return torch.where(valid_tokens, causal_mask, torch.full_like(causal_mask, min_dtype))
+
+    return causal_mask
+
 class Qwen3_5SegmentWrapper(torch.nn.Module):
     """Wrap a segment of Qwen3_5DecoderLayer for ONNX export.
     
@@ -296,7 +335,8 @@ class Qwen3_5SegmentWrapper(torch.nn.Module):
         input_ids, position_ids, attention_mask, Linear_Tc, num_logits_to_keep, conv_state
     """
     def __init__(self, embed_tokens, layers, rotary_emb, norm=None, lm_head=None,
-                 is_last_segment=False, layer_indices=None, config=None):
+                 is_last_segment=False, layer_indices=None, config=None,
+                 use_minicpm4_7_export_mask=False):
         super().__init__()
         self.embed_tokens = embed_tokens
         self.layers = torch.nn.ModuleList(layers)
@@ -306,6 +346,7 @@ class Qwen3_5SegmentWrapper(torch.nn.Module):
         self.is_last_segment = is_last_segment
         self.layer_indices = layer_indices or list(range(len(layers)))
         self.config = config
+        self.use_minicpm4_7_export_mask = use_minicpm4_7_export_mask
 
     def forward(self, hidden_states, position_ids, attention_mask, Linear_Tc, num_logits_to_keep, conv_state):
         # Embed input_ids to hidden_states (same as single-segment model)
@@ -317,25 +358,32 @@ class Qwen3_5SegmentWrapper(torch.nn.Module):
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # Match Qwen3_5TextModel.forward(): use the same mask factory as the
-        # single-segment export instead of constructing a separate manual mask.
         batch_size, seq_len = hidden_states.shape[:2]
         device = hidden_states.device
         cache_position = torch.arange(seq_len, dtype=torch.long, device=device)
 
-        if self.config is None:
-            raise ValueError("Qwen3_5SegmentWrapper requires the Qwen3_5 text config")
+        # Only MiniCPM-V 4.7 opts into the explicit export mask. Qwen3.5
+        # keeps the original create_causal_mask path, including cache_position.
+        if self.use_minicpm4_7_export_mask and (
+            torch.jit.is_tracing() or torch.onnx.is_in_onnx_export()
+        ):
+            full_attention_mask = _build_minicpm4_7_export_causal_mask(
+                hidden_states, attention_mask
+            )
+        else:
+            if self.config is None:
+                raise ValueError("Qwen3_5SegmentWrapper requires the Qwen3_5 text config")
 
-        from transformers.masking_utils import create_causal_mask
+            from transformers.masking_utils import create_causal_mask
 
-        full_attention_mask = create_causal_mask(
-            config=self.config,
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=None,
-            position_ids=None,
-        )
+            full_attention_mask = create_causal_mask(
+                config=self.config,
+                inputs_embeds=hidden_states,
+                attention_mask=attention_mask,
+                cache_position=cache_position,
+                past_key_values=None,
+                position_ids=None,
+            )
 
         # Match Qwen3_5TextModel._update_linear_attn_mask().
         linear_attn_mask = attention_mask
@@ -487,7 +535,51 @@ def _balanced_segment_layer_counts(layer_weight_sizes, num_segments, last_segmen
     return previous_states[num_layers][1]
 
 
-def causal_qwen_3_5_llm_to_onnx_multi_segment(model, args):
+def _resolve_segment_layer_counts(
+    layer_weight_sizes,
+    num_segments,
+    last_segment_extra_size=0,
+    segment_layer_counts=None,
+):
+    """Resolve manual layer counts or fall back to weight-balanced splitting.
+
+    segment_layer_counts is a contiguous partition of the transformer
+    layers. When supplied, its length determines the number of segments and
+    its values are used verbatim; otherwise the existing weight-balancing
+    algorithm is preserved.
+    """
+    if segment_layer_counts is not None:
+        if isinstance(segment_layer_counts, str):
+            segment_layer_counts = segment_layer_counts.replace(",", " ").split()
+        try:
+            counts = [int(count) for count in segment_layer_counts]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "--segment_layer_counts must be a list of positive integers"
+            ) from exc
+
+        if not counts or any(count <= 0 for count in counts):
+            raise ValueError(
+                "--segment_layer_counts must contain only positive integers"
+            )
+        total_layers = len(layer_weight_sizes)
+        if sum(counts) != total_layers:
+            raise ValueError(
+                "--segment_layer_counts must sum to the total number of "
+                f"layers ({total_layers}), got {sum(counts)}"
+            )
+        return counts
+
+    return _balanced_segment_layer_counts(
+        layer_weight_sizes,
+        num_segments,
+        last_segment_extra_size,
+    )
+
+
+def causal_qwen_3_5_llm_to_onnx_multi_segment(
+    model, args, use_minicpm4_7_export_mask=False
+):
     """Export Qwen3_5 LLM to multiple ONNX files, split by transformer blocks.
     
     Input format matches single-segment causal_qwen_3_5_llm_to_onnx:
@@ -496,6 +588,9 @@ def causal_qwen_3_5_llm_to_onnx_multi_segment(model, args):
     Each segment includes embed_tokens so it can independently embed input_ids.
     The conv_state is split per-segment based on which linear_attention layers
     are in that segment.
+
+    ``use_minicpm4_7_export_mask`` is opt-in so the existing Qwen3.5 export
+    path retains its original mask construction.
     """
     import torch
     import os
@@ -541,13 +636,20 @@ def causal_qwen_3_5_llm_to_onnx_multi_segment(model, args):
             lm_head_weight_bits,
         )
     )
-    segment_layer_counts = _balanced_segment_layer_counts(
+    segment_layer_counts = _resolve_segment_layer_counts(
         layer_weight_sizes,
         num_segments,
         last_segment_extra_size,
+        getattr(args, 'segment_layer_counts', None),
     )
     num_segments = len(segment_layer_counts)
 
+    stop_after_segment = getattr(args, 'stop_after_segment', None)
+    if stop_after_segment is not None and not 0 <= stop_after_segment < num_segments:
+        raise ValueError(
+            "--stop_after_segment must be within the exported segment range: "
+            f"0 <= {stop_after_segment} < {num_segments}"
+        )
     segment_weight_sizes = []
     layer_start = 0
     for segment_index, layer_count in enumerate(segment_layer_counts):
@@ -649,6 +751,7 @@ def causal_qwen_3_5_llm_to_onnx_multi_segment(model, args):
             is_last_segment=is_last,
             layer_indices=layer_indices,
             config=config,
+            use_minicpm4_7_export_mask=use_minicpm4_7_export_mask,
         )
         segment_model.eval()
         segment_model.float()
@@ -683,8 +786,20 @@ def causal_qwen_3_5_llm_to_onnx_multi_segment(model, args):
 
         print(f"  Segment {seg_idx} exported to {os.path.abspath(seg_path)}")
         layer_start = layer_end
+        if stop_after_segment is not None and seg_idx >= stop_after_segment:
+            print(
+                f"Stopping after segment {seg_idx} as requested by "
+                "--stop_after_segment"
+            )
+            break
 
-    print(f"All {num_segments} segments exported successfully.")
+    exported_segments = seg_idx + 1
+    if stop_after_segment is None:
+        print(f"All {num_segments} segments exported successfully.")
+    else:
+        print(
+            f"Exported requested prefix: {exported_segments}/{num_segments} segments."
+        )
 
 
 # disable attribute that may cause error while export onnx
@@ -692,10 +807,16 @@ def update_config(_config, _attr_names, _value):
     from transformers import PretrainedConfig
 
     for _attr in dir(_config):
+        if _attr.startswith('__'):
+            continue
+        try:
+            _val = getattr(_config, _attr)
+        except Exception:
+            continue
         if _attr in _attr_names:
             setattr(_config, _attr, _value)
-        elif isinstance(getattr(_config, _attr), PretrainedConfig):
-            update_config(getattr(_config, _attr), _attr_names, _value)
+        elif isinstance(_val, PretrainedConfig):
+            update_config(_val, _attr_names, _value)
 
 
 def export_tokenizer(model_path, tokenizer_path):
@@ -705,6 +826,7 @@ def export_tokenizer(model_path, tokenizer_path):
         tokenizer_path (str): Path to save the exported tokenizer in GGUF format.
     '''
     import subprocess
+    import sys
 
     # remote用于决定是否从远程下载模型文件,如果model_path以'.'、'/'或'~'开头，则remote为0，表示本地文件；否则为1，表示远程文件。
     if model_path.startswith(('.', '/', '~')):
@@ -714,19 +836,23 @@ def export_tokenizer(model_path, tokenizer_path):
 
     # 获取当前文件所在目录
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    CMD="python3 {}/../tokenizer/thirdparty/llama_vocab/convert_hf_to_gguf.py --vocab-only --outtype f16 --outfile {} {} {}".format(current_dir, tokenizer_path, "--remote" if remote == 1 else "", model_path)
+    converter = os.path.join(current_dir, '../tokenizer/thirdparty/llama_vocab/convert_hf_to_gguf.py')
+    cmd = [sys.executable, converter, '--vocab-only', '--outtype', 'f16', '--outfile', tokenizer_path]
+    if remote == 1:
+        cmd.append('--remote')
+    cmd.append(model_path)
 
     result = subprocess.run(
-        CMD,
-        shell=True,
+        cmd,
         capture_output=True,
         text=True
     )
 
     # 检查命令是否成功执行
     if result.returncode != 0:
-        print(result.stderr) 
-        print(f"Tokenizer exported failed.")
+        print(result.stdout)
+        print(result.stderr)
+        raise RuntimeError(f"Tokenizer export failed with exit code {result.returncode}")
     else:
         print(f"Tokenizer exported to {tokenizer_path}")
 
@@ -903,8 +1029,9 @@ def export_llm_config(model_path, config_path, chat_context, prompt, user_config
     print("prompt_prefix:\n", repr(prompt_prefix)[1:-1])
     print("prompt_postfix:\n", repr(prompt_postfix)[1:-1])
     
-    vocab_size = config.vocab_size if hasattr(config, "vocab_size") else config.text_config.vocab_size
-    hidden_size = config.hidden_size if hasattr(config, "hidden_size") else config.text_config.hidden_size
+    text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+    vocab_size = text_config.vocab_size
+    hidden_size = text_config.hidden_size
 
     hf_config_json = json.dumps(config.to_dict(), default=str)
     if user_config is not None:
@@ -953,8 +1080,9 @@ def export_smol_llm_config(model_path, config_path):
     print("prompt_prefix:\n", repr(prompt_prefix)[1:-1])
     print("prompt_postfix:\n", repr(prompt_postfix)[1:-1])
     
-    vocab_size = config.vocab_size if hasattr(config, "vocab_size") else config.text_config.vocab_size
-    hidden_size = config.hidden_size if hasattr(config, "hidden_size") else config.text_config.hidden_size
+    text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+    vocab_size = text_config.vocab_size
+    hidden_size = text_config.hidden_size
 
     llm_config = {
         "system_prompt": system_prompt,

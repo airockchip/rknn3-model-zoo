@@ -4,7 +4,7 @@ Tokenizer提供了一个通用的分词器接口，支持多种后端（如Llama
 
 ## 1. 编译说明
 
-支持在不同目标平台（Linux、Android、RISC-V）进行编译
+支持在不同目标平台（Linux、Android、RISC-V、macOS）进行编译
 
 ### 1.1 编译脚本说明
 
@@ -12,8 +12,8 @@ build.sh支持的参数选项如下：
 
 | 选项 | 说明                                             | 示例         |
 | ---- | ------------------------------------------------ | ------------ |
-| `-s` | 目标系统平台（`linux`、`android`、`riscv64`）    | `-s linux`   |
-| `-a` | 目标架构                                         | `-a aarch64` |
+| `-s` | 目标系统平台（`linux`、`android`、`riscv64`、`macos`） | `-s linux`   |
+| `-a` | 目标架构（macOS：`arm64`）                    | `-a aarch64` |
 | `-n` | SDK 名称（默认：`tokenizer`）                    | `-n my_sdk`  |
 | `-b` | 编译类型（`Debug`、`Release`、`RelWithDebInfo`） | `-b Debug`   |
 | `-m` | 启用ASAN（选填）                                 | `-m`         |
@@ -25,6 +25,7 @@ build.sh支持的参数选项如下：
 - Linux 平台：`env_linux.sh`
 - Android 平台：`env_android.sh`
 - RISC-V 平台：`env_riscv64.sh`
+- macOS 平台：`env_macos.sh`（使用系统 clang，无需额外交叉工具链）
 
 请确保这些脚本存在且正确设置如下变量：
 
@@ -55,6 +56,13 @@ build.sh支持的参数选项如下：
 ```
 ./build.sh -s riscv64 -a generic -b Release
 ```
+
+编译 **macOS / arm64**（Apple Silicon）：
+
+```
+./build.sh -s macos -a arm64 -b Release
+```
+
 
 启用 **ASAN**：
 

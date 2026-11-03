@@ -20,6 +20,21 @@
 
 #include "rknn_qwen3_vl_llm.h"
 
+// 多卡/多设备场景下可通过环境变量 RKNN3_DEVICE_ID 指定设备（如 0001:11:00.0）；
+// 未设置时沿用 rknn3 默认行为（使用第一个设备）。
+static int init_rknn3_context(rknn3_context* ctx)
+{
+    const char* device_id = getenv("RKNN3_DEVICE_ID");
+    if (device_id != nullptr && device_id[0] != '\0') {
+        rknn3_init_extend init_extend;
+        memset(&init_extend, 0, sizeof(init_extend));
+        init_extend.device_id = (char*)device_id;
+        printf("Using RKNN3 device: %s\n", device_id);
+        return rknn3_init(ctx, &init_extend);
+    }
+    return rknn3_init(ctx, NULL);
+}
+
 // 为 session 设置 chat template 与 callback
 static int setup_session(rknn3_session* session, RKLLMCallback& callback)
 {
@@ -100,7 +115,7 @@ int init_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx, const char* model_path
     rknn3_tensor_attr deepstack_attrs[3];
 
     // RKNN Init
-    ret = rknn3_init(&ctx, NULL);
+    ret = init_rknn3_context(&ctx);
     if (ret < 0) {
         printf("rknn_init fail ret=%d\n", ret);
         return ret;
@@ -138,29 +153,13 @@ int init_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx, const char* model_path
     if (ret < 0)
         return ret;
 
-    // LoRA session: 初始化
-    session_lora = rknn3_session_init(ctx, &params_lora, 1);
-    if (!session_lora) {
-        printf("Failed to initialize lora session\n");
-        return -1;
-    }
-
     rknn3_lora lora = {0};
     bool lora_enabled = false;
-    if (lora_weight_path != nullptr) {
-        ret = setup_context_lora(ctx, session_lora, lora_weight_path, &lora);
-        if (ret < 0) {
-            printf("Warning: LoRA setup failed, lora session will run as base\n");
-        } else {
-            lora_enabled = true;
-        }
-    }
+    // LoRA session 不在这里创建：同一 context 同时存在两个 session 会挤占运行期传输缓冲，
+    // base 段推理结束后由 create_qwen3_vl_llm_lora_session() 按需创建。
+    (void)lora_weight_path;
 
-    ret = setup_session(session_lora, callback);
-    if (ret < 0)
-        return ret;
-
-    // Deepstack aux tensors
+    // Deepstack aux tensors: base 与 lora 各一套，分别接收 base / lora vision 的输出
     for (int i = 0; i < 3; i++) {
         deepstack_attrs[i].index = 2 + i; //deepstack的index为2、3、 4,可以通过rknn3_query查询所有input_attrs定位到deepstack的index
         ret = rknn3_query(ctx, RKNN3_QUERY_INPUT_ATTR, &(deepstack_attrs[i]), sizeof(rknn3_tensor_attr));
@@ -174,6 +173,12 @@ int init_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx, const char* model_path
           printf("fail to create aux_input_tensor.mem!\n");
           return -1;
         }
+
+        llm_ctx->deepstack_tensor_lora[i].mem = rknn3_create_mem(ctx, *deepstack_aligned_size, deepstack_attrs[i].core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
+        if (!llm_ctx->deepstack_tensor_lora[i].mem) {
+          printf("fail to create lora aux_input_tensor.mem!\n");
+          return -1;
+        }
     }
 
     llm_ctx->rknn_ctx = ctx;
@@ -181,6 +186,61 @@ int init_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx, const char* model_path
     llm_ctx->rknn_sess_lora = session_lora;
     llm_ctx->lora = lora;
     llm_ctx->lora_enabled = lora_enabled;
+    llm_ctx->lora_deepstack_ready = false;
+    llm_ctx->params_lora = params_lora;
+    llm_ctx->callback = &callback;
+    return 0;
+}
+
+// base 段推理结束后释放 base session，保证同一时刻只有一个 session
+int destroy_qwen3_vl_llm_base_session(rknn_qwen3_vl_llm_context* llm_ctx)
+{
+    if (!llm_ctx || !llm_ctx->rknn_sess_base) {
+        return 0;
+    }
+    rknn3_session_destroy(llm_ctx->rknn_sess_base);
+    llm_ctx->rknn_sess_base = NULL;
+    printf("Base session released\n");
+    return 0;
+}
+
+// 在 base session 销毁之后再创建带 LoRA 的 session
+int create_qwen3_vl_llm_lora_session(rknn_qwen3_vl_llm_context* llm_ctx, const char* lora_weight_path)
+{
+    if (!llm_ctx) {
+        return -1;
+    }
+    if (llm_ctx->rknn_sess_lora) {
+        return 0;
+    }
+
+    llm_ctx->rknn_sess_lora = rknn3_session_init(llm_ctx->rknn_ctx, &llm_ctx->params_lora, 1);
+    if (!llm_ctx->rknn_sess_lora) {
+        printf("Failed to initialize lora session\n");
+        return -1;
+    }
+
+    rknn3_lora lora = {0};
+    int ret = 0;
+    if (lora_weight_path == nullptr) {
+        // 只跑 vision LoRA 时，第二段 LLM session 不带 LoRA，便于单独对比 vision LoRA 的效果
+        printf("No LLM LoRA weight provided, the second session runs without LoRA\n");
+        llm_ctx->lora_enabled = false;
+    } else {
+        ret = setup_context_lora(llm_ctx->rknn_ctx, llm_ctx->rknn_sess_lora, lora_weight_path, &lora);
+        if (ret < 0) {
+            printf("Warning: LoRA setup failed, lora session will run as base\n");
+            llm_ctx->lora_enabled = false;
+        } else {
+            llm_ctx->lora = lora;
+            llm_ctx->lora_enabled = true;
+        }
+    }
+
+    ret = setup_session(llm_ctx->rknn_sess_lora, *llm_ctx->callback);
+    if (ret < 0) {
+        return ret;
+    }
     return 0;
 }
 
@@ -190,6 +250,10 @@ int release_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx)
         if (llm_ctx->deepstack_tensor[i].mem) {
             rknn3_destroy_mem(llm_ctx->rknn_ctx, llm_ctx->deepstack_tensor[i].mem);
             llm_ctx->deepstack_tensor[i].mem = nullptr;
+        }
+        if (llm_ctx->deepstack_tensor_lora[i].mem) {
+            rknn3_destroy_mem(llm_ctx->rknn_ctx, llm_ctx->deepstack_tensor_lora[i].mem);
+            llm_ctx->deepstack_tensor_lora[i].mem = nullptr;
         }
     }
 
@@ -215,7 +279,7 @@ int release_qwen3_vl_llm(rknn_qwen3_vl_llm_context* llm_ctx)
     return 0;
 }
 
-static int inference_qwen3_vl_llm_with_session(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_session* session, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t* perf, const char* session_name)
+static int inference_qwen3_vl_llm_with_session(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_session* session, rknn3_aux_tensor* deepstack, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t* perf, const char* session_name)
 {
     int ret;
     rknn3_llm_input inputs[n_inputs];
@@ -230,7 +294,7 @@ static int inference_qwen3_vl_llm_with_session(rknn_qwen3_vl_llm_context* llm_ct
     inputs[0].multimodal_input = tensor;
     for (int i = 0; i < 3; i++) {
         inputs[i + 1].input_type = RKNN3_LLM_INPUT_AUX;
-        inputs[i + 1].aux_input  = llm_ctx->deepstack_tensor[i];
+        inputs[i + 1].aux_input  = deepstack[i];
     }
 
     printf("rknn_session_run (%s)\n", session_name);
@@ -243,8 +307,6 @@ static int inference_qwen3_vl_llm_with_session(rknn_qwen3_vl_llm_context* llm_ct
     }
 
     RKLLMRunState state = {0};
-    rknn3_lora lora[RKNN3_MAX_LORA_NUM] = {0};
-    state.loras_enabled = lora;
     ret = rknn3_session_query_state(session, &state);
     if (ret < 0) {
         printf("rknn_session_query_state fail! ret=%d\n", ret);
@@ -261,7 +323,7 @@ int inference_qwen3_vl_llm_base(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_llm_mu
         printf("llm_ctx or rknn_sess_base is NULL\n");
         return -1;
     }
-    return inference_qwen3_vl_llm_with_session(llm_ctx, llm_ctx->rknn_sess_base, tensor, n_inputs, perf, "base");
+    return inference_qwen3_vl_llm_with_session(llm_ctx, llm_ctx->rknn_sess_base, llm_ctx->deepstack_tensor, tensor, n_inputs, perf, "base");
 }
 
 int inference_qwen3_vl_llm_lora(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_llm_multimodal_tensor tensor, int n_inputs, rknn_perf_metrics_t* perf)
@@ -273,5 +335,10 @@ int inference_qwen3_vl_llm_lora(rknn_qwen3_vl_llm_context* llm_ctx, rknn3_llm_mu
     if (!llm_ctx->lora_enabled) {
         printf("Warning: LoRA is not enabled, running lora session without LoRA\n");
     }
-    return inference_qwen3_vl_llm_with_session(llm_ctx, llm_ctx->rknn_sess_lora, tensor, n_inputs, perf, "lora");
+    // 如果跑过带 LoRA 的 vision，则使用 lora vision 的 deepstack，否则复用 base vision 的结果
+    rknn3_aux_tensor* deepstack = llm_ctx->lora_deepstack_ready ? llm_ctx->deepstack_tensor_lora : llm_ctx->deepstack_tensor;
+    if (!llm_ctx->lora_deepstack_ready) {
+        printf("Warning: no vision LoRA deepstack, reusing base vision deepstack\n");
+    }
+    return inference_qwen3_vl_llm_with_session(llm_ctx, llm_ctx->rknn_sess_lora, deepstack, tensor, n_inputs, perf, "lora");
 }
