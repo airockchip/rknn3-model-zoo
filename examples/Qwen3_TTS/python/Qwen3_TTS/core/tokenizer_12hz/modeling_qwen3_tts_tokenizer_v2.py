@@ -532,22 +532,29 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(Qwen3TTSTokenizerV2DecoderPreTr
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
-            mask_kwargs = {
-                "config": self.config,
-                "input_embeds": inputs_embeds,
-                "attention_mask": attention_mask,
-                "cache_position": cache_position,
-                "past_key_values": past_key_values,
-                "position_ids": position_ids,
-            }
-            # Create the masks
+            # Build causal & sliding-window masks directly without functorch vmap so both
+            # transformers>=4.57 eager calls and TorchScript ONNX tracing succeed.
+            batch_size = inputs_embeds.shape[0]
+            past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+            kv_len = past_seen + inputs_embeds.shape[1]
+            q_idx = cache_position.unsqueeze(1)
+            kv_idx = torch.arange(kv_len, device=inputs_embeds.device).unsqueeze(0)
+            full_bool = (kv_idx <= q_idx).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1)
+            if attention_mask is not None and attention_mask.ndim == 2:
+                full_bool = full_bool & attention_mask[:, None, None, :kv_len].to(torch.bool)
+
+            def _format_mask(bmask: torch.Tensor) -> torch.Tensor:
+                if self.config._attn_implementation == "sdpa":
+                    return bmask
+                min_dtype = torch.finfo(inputs_embeds.dtype).min
+                return torch.zeros(bmask.shape, dtype=inputs_embeds.dtype, device=bmask.device).masked_fill(~bmask, min_dtype)
+
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
+                "full_attention": _format_mask(full_bool),
             }
-            # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
-                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+                sliding_bool = full_bool & ((kv_idx > (q_idx - self.window_size)).unsqueeze(0).unsqueeze(0))
+                causal_mask_mapping["sliding_attention"] = _format_mask(sliding_bool)
 
         hidden_states = inputs_embeds
 
