@@ -117,18 +117,19 @@ def build_model(args):
 
 
 def export_speaker_embed_hpp(model, args):
+    import librosa
     output_path = resolve_path(args.output_path)
     speaker_name = args.speaker_name
 
-    prompt_items = model.create_voice_clone_prompt(
-        ref_audio=args.ref_audio,
-        ref_text=None,
-        x_vector_only_mode=True,
-    )
-    if not prompt_items:
-        raise RuntimeError("create_voice_clone_prompt returned empty prompt_items")
-
-    embedding = prompt_items[0].ref_spk_embedding
+    normalized = model._normalize_audio_inputs(model._ensure_list(args.ref_audio))
+    if not normalized:
+        raise RuntimeError("_normalize_audio_inputs returned empty audio list")
+    wav, sr = normalized[0]
+    target_sr = model.model.speaker_encoder_sample_rate
+    if int(sr) != int(target_sr):
+        wav = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=int(target_sr))
+    with torch.no_grad():
+        embedding = model.model.extract_speaker_embedding(audio=wav.astype(np.float32), sr=int(target_sr))
     values = embedding.detach().cpu().numpy().astype(np.float32).reshape(-1).tolist()
 
     embeddings_map = parse_existing_header(output_path)
