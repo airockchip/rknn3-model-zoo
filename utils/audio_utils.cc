@@ -17,7 +17,13 @@
 
 #include "audio_utils.h"
 
+#ifndef ENABLE_NEON
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#define ENABLE_NEON     1
+#else
 #define ENABLE_NEON     0
+#endif
+#endif
 
 #if ENABLE_NEON
 #include "arm_neon.h"
@@ -249,10 +255,13 @@ void transpose(std::complex<float> *input, int input_rows, int input_cols, std::
 #if ENABLE_NEON
 void matmul_by_neon(float *A, float *B, std::vector<float> &C, int ROWS_A, int COLS_A, int COLS_B)
 {
-    int k_start = COLS_A, k_end = 0;
-    for (auto i = 0; i < ROWS_A; i++)
+    std::fill(C.begin(), C.end(), 0.0f);
+
+    for (int i = 0; i < ROWS_A; i++)
     {
-        for (auto k = 0; k < COLS_A; k++)
+        int k_start = COLS_A;
+        int k_end = -1;
+        for (int k = 0; k < COLS_A; k++)
         {
             if (A[i * COLS_A + k] != 0.0f)
             {
@@ -260,7 +269,11 @@ void matmul_by_neon(float *A, float *B, std::vector<float> &C, int ROWS_A, int C
                 break;
             }
         }
-        for (auto k = COLS_A - 1; k > 0; k--)
+        if (k_start == COLS_A)
+        {
+            continue;
+        }
+        for (int k = COLS_A - 1; k >= k_start; k--)
         {
             if (A[i * COLS_A + k] != 0.0f)
             {
@@ -269,28 +282,27 @@ void matmul_by_neon(float *A, float *B, std::vector<float> &C, int ROWS_A, int C
             }
         }
 
-        int k_diff = k_end - k_start + 1;
-        if (k_diff % 4)
+        float *c_row = &C[i * COLS_B];
+        int j = 0;
+        for (; j + 4 <= COLS_B; j += 4)
         {
-            k_diff = 4 - (k_diff % 4);
-            if (k_start > k_diff)
-                k_start -= k_diff;
-            else if (k_end < (COLS_A - k_diff))
-                k_end += k_diff;
-        }
-        k_diff = (k_end - k_start) % 4;
-        for (auto j = 0; j < COLS_B; j++)
-        {
-            float32x4_t v_tot = vdupq_n_f32(0.0f);
-            for (auto k = k_start; k <= k_end - 3; k += 4)
+            float32x4_t v_acc = vdupq_n_f32(0.0f);
+            for (int k = k_start; k <= k_end; k++)
             {
-                float32x4_t vq_mat1 = vld1q_f32(&A[i * COLS_A + k]);
-                float32x4_t vq_mat2 = vld1q_f32(&B[k * COLS_B + j]);
-                v_tot = vmlaq_f32(v_tot, vq_mat1, vq_mat2);
+                float a_val = A[i * COLS_A + k];
+                float32x4_t v_b = vld1q_f32(&B[k * COLS_B + j]);
+                v_acc = vmlaq_n_f32(v_acc, v_b, a_val);
             }
-
-            float32x2_t tmp = vadd_f32(vget_high_f32(v_tot), vget_low_f32(v_tot));
-            C[i * COLS_B + j] = vget_lane_f32(tmp, 0) + vget_lane_f32(tmp, 1);
+            vst1q_f32(&c_row[j], v_acc);
+        }
+        for (; j < COLS_B; j++)
+        {
+            float sum = 0.0f;
+            for (int k = k_start; k <= k_end; k++)
+            {
+                sum += A[i * COLS_A + k] * B[k * COLS_B + j];
+            }
+            c_row[j] = sum;
         }
     }
 }
