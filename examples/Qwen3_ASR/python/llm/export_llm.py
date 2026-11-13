@@ -136,6 +136,29 @@ if __name__ == '__main__':
     args.arch = "Qwen3-ASR"
     causal_llm_to_onnx(model, args)
 
+    # Patch baked [seq_len, 1] Reshape -> [-1, 1] for transformers >= 4.57 dynamic shape compatibility
+    import onnx
+    import numpy as np
+    from onnx import numpy_helper
+    onnx_model = onnx.load(args.export_llm_path, load_external_data=False)
+    new_shape = np.array([-1, 1], dtype=np.int64)
+    for node in onnx_model.graph.node:
+        if node.op_type == "Reshape" and node.name in ("/model/Reshape", "/model/model/Reshape"):
+            shape_input = node.input[1]
+            for i, init in enumerate(onnx_model.graph.initializer):
+                if init.name == shape_input:
+                    onnx_model.graph.initializer[i].CopyFrom(numpy_helper.from_array(new_shape, shape_input))
+                    break
+            else:
+                for cn in onnx_model.graph.node:
+                    if cn.op_type == "Constant" and cn.output[0] == shape_input:
+                        for attr in cn.attribute:
+                            if attr.name == "value":
+                                attr.t.CopyFrom(numpy_helper.from_array(new_shape))
+                                break
+            break
+    onnx.save(onnx_model, args.export_llm_path)
+
     # Export LLM configuration 
     llm_config = {
     'vocab_size' : config.text_config.vocab_size,

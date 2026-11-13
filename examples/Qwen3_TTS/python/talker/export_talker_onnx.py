@@ -248,15 +248,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     model = build_model(args)
-    if args.quant and torch.cuda.is_available(): # qwen3-tts 全int4量化精度较低，需要开启混合量化
+    if args.quant: # qwen3-tts 全int4量化精度较低，需要开启混合量化
         from rknn.quantization.api import RKQuantizer
 
-        
+        quant_device = 'cuda' if torch.cuda.is_available() else 'cpu'
         ## 初始化量化工具
         QuantTool = RKQuantizer(verbose=True)
         
         ## 量化工具加载模型
-        ret = QuantTool.load_model(model=model.talker.model, tokenizer=None, device='cuda')
+        ret = QuantTool.load_model(model=model.talker.model, tokenizer=None, device=quant_device)
         if ret != 0:
             print('Load model failed!')
             exit(ret)
@@ -271,7 +271,7 @@ if __name__ == "__main__":
         model = model.cpu()
 
     export_talker(model, args)
-    if args.quant and torch.cuda.is_available(): ## 混合量化开启下，需要导出op位宽配置json文件，在后续导出rknn的时候使用
+    if args.quant: ## 混合量化开启下，需要导出op位宽配置json文件，在后续导出rknn的时候使用
         QuantTool.export_op_quantized_dtype(args.export_talker_path, op_dtype_path='layer_bit.json')
     
     
